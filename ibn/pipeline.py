@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from ibn.config import Settings
 from ibn.control.audit import AuditLog
@@ -50,6 +50,7 @@ class Plan(BaseModel):
     probes: list[dict[str, Any]] = Field(default_factory=list)
     state_fingerprint: str = ""
 
+    @computed_field
     @property
     def ok(self) -> bool:
         return self.candidate is not None and self.validation is not None and self.validation.passed

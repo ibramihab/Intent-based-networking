@@ -4,7 +4,7 @@ This document maps each layer of the team's diagram to the code.
 
 | Diagram layer | Code | Status |
 |---|---|---|
-| Interface Layer (Web UI) | `ibn/cli.py` (Typer CLI). `ibn/pipeline.py` is the API a future web UI will call | CLI only, by design for now |
+| Interface Layer (Web UI) | `ibn/web/` (FastAPI API + single-page GUI) on top of `ibn/pipeline.py` | done (authentication/RBAC still to do) |
 | Intent Layer | `ibn/intent/` | done (Gemini + offline parser) |
 | Translation & Validation Layer | `ibn/translation/`, `ibn/validation/` | **main focus** |
 | Control Layer | `ibn/control/` | **main focus** |
@@ -32,7 +32,7 @@ text ─► parser (Gemini, KB-grounded) ─► clarification questions? ─► 
 
 * `parser.py`: the system prompt includes the Knowledge Base (groups, hosts, devices), so the
   LLM can only refer to entities that exist. It returns `{"intents": [...], "clarifications": [...]}`.
-  The CLI asks the operator each clarification question and re-prompts, up to 3 rounds. If the
+  The GUI shows the questions and sends the operator's answer back in the same conversation. If the
   JSON fails the schema, the errors are sent back to the LLM once for a repair.
 * `llm.py`: `LLMProvider` protocol and a Gemini REST client that retries 429/5xx with
   backoff. Swapping in another LLM means writing one class.
@@ -44,7 +44,7 @@ text ─► parser (Gemini, KB-grounded) ─► clarification questions? ─► 
     protected infrastructure subnets
   * **conflicts**: traffic-space overlap against deployed intents and the rest of the same
     request. Opposite actions must be decided by priority or by specificity, using the same
-    precedence function the generator uses. Otherwise it's an error, and the CLI offers to
+    precedence function the generator uses. Otherwise it's an error, and the GUI offers to
     raise the new intent's priority.
 
 ## Translation (`ibn/translation/`)
@@ -114,4 +114,4 @@ and deploying a stale plan is refused.
 * The simulator models what IBN manages, not dynamic routing or unmanaged ACLs. Batfish is
   the high-fidelity option.
 * Next intent types: connectivity (static/OSPF/GRE selection), QoS. Next: telemetry
-  (SNMP/syslog) feeding verification, and the web UI with RBAC.
+  (SNMP/syslog) feeding verification, and authentication/RBAC for the web UI.

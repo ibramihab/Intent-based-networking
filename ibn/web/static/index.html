@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IBN Console</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">◆</span> IBN Console</div>
+  <nav id="nav">
+    <button data-view="submit" class="active">New intent</button>
+    <button data-view="intents">Intents</button>
+    <button data-view="network">Network</button>
+    <button data-view="history">History</button>
+  </nav>
+  <div id="llm-status" class="pill">…</div>
+</header>
+
+<main>
+  <!-- ============================================================ NEW INTENT -->
+  <section id="view-submit" class="view">
+    <div class="card">
+      <h2>What should the network do?</h2>
+      <p class="muted">Write it in plain English, e.g. <em>“HR may only reach VPC5 over https”</em> or
+        <em>“isolate HR and Finance completely”</em>.</p>
+      <textarea id="intent-text" rows="3" placeholder="Block HR from reaching Finance on ssh"></textarea>
+      <div class="row">
+        <label>Parser
+          <select id="parser">
+            <option value="gemini">Gemini (AI)</option>
+            <option value="offline">Offline (keywords)</option>
+          </select>
+        </label>
+        <label>Solution
+          <select id="solution">
+            <option value="">Automatic</option>
+            <option value="acl">ACL</option>
+            <option value="firewall">Zone-based firewall</option>
+            <option value="vlan">VLAN</option>
+          </select>
+        </label>
+        <span class="grow"></span>
+        <button id="analyze" class="primary">Analyze intent</button>
+      </div>
+      <div id="examples" class="chips"></div>
+    </div>
+
+    <div id="clarify" class="card warn hidden">
+      <h3>The AI needs more detail</h3>
+      <ul id="clarify-questions"></ul>
+      <div class="row">
+        <input id="clarify-answer" placeholder="Your answer">
+        <button id="clarify-send" class="primary">Send answer</button>
+      </div>
+    </div>
+
+    <div id="plan-area"></div>
+  </section>
+
+  <!-- ============================================================ INTENTS -->
+  <section id="view-intents" class="view hidden">
+    <div class="card">
+      <div class="row"><h2>Intent dashboard</h2><span class="grow"></span><button id="intents-refresh">Refresh</button></div>
+      <div id="intents-table"></div>
+    </div>
+  </section>
+
+  <!-- ============================================================ NETWORK -->
+  <section id="view-network" class="view hidden">
+    <div class="grid2">
+      <div class="card">
+        <h2>Simulate a flow</h2>
+        <p class="muted">Trace a packet through what IBN has deployed. Use a host, group or IP.</p>
+        <div class="row wrap">
+          <label>From <input id="sim-src" value="VPC4"></label>
+          <label>To <input id="sim-dst" value="VPC5"></label>
+          <label>Protocol
+            <select id="sim-proto"><option>icmp</option><option>tcp</option><option>udp</option></select>
+          </label>
+          <label>Port <input id="sim-port" type="number" min="1" max="65535" placeholder="any"></label>
+          <button id="sim-run" class="primary">Trace</button>
+        </div>
+        <div id="sim-result"></div>
+      </div>
+      <div class="card">
+        <div class="row"><h2>Knowledge base</h2><span class="grow"></span>
+          <button id="kb-sync" title="Pull running configs from the devices">Sync configs from devices</button></div>
+        <div id="kb-issues"></div>
+        <div id="kb-sync-result"></div>
+      </div>
+    </div>
+    <div class="card"><h3>Groups</h3><div id="kb-groups"></div></div>
+    <div class="card"><h3>Hosts</h3><div id="kb-hosts"></div></div>
+    <div class="card"><h3>Devices</h3><div id="kb-devices"></div></div>
+  </section>
+
+  <!-- ============================================================ HISTORY -->
+  <section id="view-history" class="view hidden">
+    <div class="card">
+      <div class="row"><h2>Audit log</h2><span class="grow"></span><button id="history-refresh">Refresh</button></div>
+      <div id="history-table"></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class Severity(str, Enum):
@@ -42,6 +42,7 @@ class StageResult(BaseModel):
     skipped: bool = False
     details: dict[str, Any] = Field(default_factory=dict)
 
+    @computed_field
     @property
     def passed(self) -> bool:
         return not any(i.severity == Severity.ERROR for i in self.issues)
@@ -51,6 +52,7 @@ class ValidationReport(BaseModel):
     title: str
     stages: list[StageResult] = Field(default_factory=list)
 
+    @computed_field
     @property
     def passed(self) -> bool:
         return all(s.passed for s in self.stages)
