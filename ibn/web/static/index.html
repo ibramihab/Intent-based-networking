@@ -24,21 +24,14 @@
     <div class="card">
       <h2>What should the network do?</h2>
       <p class="muted">Write it in plain English, e.g. <em>“HR may only reach VPC5 over https”</em> or
-        <em>“isolate HR and Finance completely”</em>.</p>
+        <em>“isolate HR and Finance completely”</em>.
+        The AI also decides how to enforce it (ACL, zone-based firewall or VLAN) and explains why.</p>
       <textarea id="intent-text" rows="3" placeholder="Block HR from reaching Finance on ssh"></textarea>
       <div class="row">
         <label>Parser
           <select id="parser">
             <option value="gemini">Gemini (AI)</option>
             <option value="offline">Offline (keywords)</option>
-          </select>
-        </label>
-        <label>Solution
-          <select id="solution">
-            <option value="">Automatic</option>
-            <option value="acl">ACL</option>
-            <option value="firewall">Zone-based firewall</option>
-            <option value="vlan">VLAN</option>
           </select>
         </label>
         <span class="grow"></span>

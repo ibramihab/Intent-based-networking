@@ -17,11 +17,12 @@ from collections import defaultdict
 
 from ibn.intent.space import TrafficSpace, specificity
 from ibn.kb.knowledge_base import KnowledgeBase
-from ibn.models.intent import Action, Intent, SolutionKind
+from ibn.models.intent import Action, Intent, Protocol, SolutionKind
 from ibn.models.netconfig import (AccessList, AccessPort, AclBinding, CandidateConfig, DeviceChange, DeviceState,
                                   FirewallConfig, PolicyRule, Vlan, ZonePair)
 from ibn.translation.drivers import get_driver
-from ibn.translation.placement import acl_placement, device_zones, directional_rules, firewall_placement
+from ibn.translation.placement import (acl_placement, device_zones, directional_rules, firewall_placement,
+                                      same_segment)
 
 
 class GenerationError(Exception):
@@ -49,19 +50,22 @@ def desired_states(kb: KnowledgeBase, records: list[tuple[Intent, SolutionKind]]
 
     for intent, kind in records:
         if kind == SolutionKind.VLAN:
-            host = kb.hosts[intent.source.host]
+            host = _vlan_target(kb, intent)
             isolate[(host.switch, host.port)] = host.name
             continue
         for rule in directional_rules(intent, kb):
+            if same_segment(kb, rule):
+                raise GenerationError(f"{intent.id}: {rule.src} and {rule.dst} share one L2 segment, so the traffic "
+                                      f"never crosses a router and a {kind.value} cannot filter it (use vlan)")
             if kind == SolutionKind.ACL:
                 p = acl_placement(kb, rule)
                 if not p:
-                    raise GenerationError(f"{intent.id}: cannot place ACL for {rule.src} -> {rule.dst}")
+                    raise GenerationError(f"{intent.id}: no router interface is attached to {rule.src} or {rule.dst}")
                 acl_rules[(p.device, p.interface, p.direction)].append((_rule_key(intent, rule), rule))
             else:
                 p = firewall_placement(kb, rule)
                 if not p:
-                    raise GenerationError(f"{intent.id}: no zone boundary for {rule.src} -> {rule.dst}")
+                    raise GenerationError(f"{intent.id}: no zone boundary separates {rule.src} and {rule.dst}")
                 fw_rules[(p.device, p.src_zone, p.dst_zone)].append((_rule_key(intent, rule), rule))
 
     devices = set(current) | {k[0] for k in acl_rules} | {k[0] for k in fw_rules} | {k[0] for k in isolate}
@@ -115,6 +119,21 @@ def desired_states(kb: KnowledgeBase, records: list[tuple[Intent, SolutionKind]]
     return out
 
 
+def _vlan_target(kb: KnowledgeBase, intent: Intent):
+    """VLAN isolation is only possible for two hosts on the same access switch; returns the host to move."""
+    if intent.action != Action.DENY or any(s.protocol != Protocol.IP for s in intent.services):
+        raise GenerationError(f"{intent.id}: a VLAN can only isolate all traffic; it cannot permit or filter "
+                              "specific services (use acl or firewall)")
+    if not (intent.source.host and intent.destination.host):
+        raise GenerationError(f"{intent.id}: {intent.source.label} and {intent.destination.label} are routed "
+                              "subnets; L2 segmentation cannot separate them (use acl or firewall)")
+    a, b = kb.hosts[intent.source.host], kb.hosts[intent.destination.host]
+    if not a.switch or a.switch != b.switch or a.group != b.group:
+        raise GenerationError(f"{intent.id}: {a.name} and {b.name} are not on the same access switch and subnet "
+                              "(use acl or firewall)")
+    return a
+
+
 def _vlan_state(kb: KnowledgeBase, dev: str, cur: DeviceState, new: DeviceState, isolate: dict[str, str]) -> None:
     lo, hi = kb.policies.vlan_range
     used = {v.id for v in cur.vlans} | {i.vlan for i in kb.interfaces.get(dev, {}).values() if i.vlan}
@@ -142,7 +161,7 @@ def _original_vlan(kb: KnowledgeBase, dev: str, port: str) -> int:
 
 
 def build_candidate(kb: KnowledgeBase, records: list[tuple[Intent, SolutionKind]],
-                    current: dict[str, DeviceState], solution: SolutionKind | None) -> CandidateConfig:
+                    current: dict[str, DeviceState]) -> CandidateConfig:
     stage_order = kb.policies.deployment.get("stage_order", ["switch", "router"])
     changes = []
     for dev, after in desired_states(kb, records, current).items():
@@ -159,4 +178,4 @@ def build_candidate(kb: KnowledgeBase, records: list[tuple[Intent, SolutionKind]
                                     rollback=driver.render_transition(after, before)))
     role_rank = lambda c: (stage_order.index(kb.devices[c.device].role)  # noqa: E731
                            if kb.devices[c.device].role in stage_order else len(stage_order), c.device)
-    return CandidateConfig(solution=solution, changes=sorted(changes, key=role_rank))
+    return CandidateConfig(changes=sorted(changes, key=role_rank))

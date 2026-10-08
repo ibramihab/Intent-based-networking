@@ -1,12 +1,13 @@
 import ipaddress
 
+import pytest
+
 from ibn.intent.validation import validate_intents
 from ibn.kb.knowledge_base import Host
-from ibn.models.intent import Protocol, SolutionKind
+from ibn.models.intent import Intent, Protocol, SolutionKind
 from ibn.models.report import Severity
 from ibn.translation.drivers import get_driver
-from ibn.translation.generator import build_candidate
-from ibn.translation.selector import rank
+from ibn.translation.generator import GenerationError, build_candidate
 from ibn.validation.simulator import Flow, Simulator
 from ibn.validation.validator import Validator
 from tests.conftest import intent
@@ -21,19 +22,21 @@ def _intents(kb, *raw):
 
 
 def _candidate(kb, intents, kind, current=None):
-    return build_candidate(kb, [(i, kind) for i in intents], current or {}, kind)
+    return build_candidate(kb, [(i, kind) for i in intents], current or {})
 
 
-def test_selector_prefers_acl_for_deny_and_rejects_vlan_for_routed_groups(kb):
-    opts = rank(_intents(kb, intent()), kb)
-    assert opts[0].kind == SolutionKind.ACL
-    vlan = next(o for o in opts if o.kind == SolutionKind.VLAN)
-    assert not vlan.feasible and "routed subnets" in vlan.reasons[0]
+def test_llm_solution_is_stored_on_the_intent(kb):
+    (it,) = _intents(kb, intent(solution="firewall", solution_reason="stateful"))
+    assert it.solution == SolutionKind.FIREWALL and "via firewall" in it.summary()
+    legacy = Intent.model_validate({**intent(), "preferred_solution": None})
+    assert legacy.solution == SolutionKind.ACL
 
 
-def test_operator_preference_wins(kb):
-    opts = rank(_intents(kb, intent(preferred_solution="firewall")), kb)
-    assert opts[0].kind == SolutionKind.FIREWALL
+def test_generator_rejects_vlan_for_routed_groups(kb):
+    with pytest.raises(GenerationError, match="routed subnets"):
+        _candidate(kb, _intents(kb, intent()), SolutionKind.VLAN)
+    with pytest.raises(GenerationError, match="only isolate all traffic"):
+        _candidate(kb, _intents(kb, intent(services=[{"protocol": "tcp", "ports": [22]}])), SolutionKind.VLAN)
 
 
 def test_acl_rendering_order_and_rollback(kb):
@@ -54,7 +57,7 @@ def test_acl_update_is_hitless_swap(kb):
     c1 = _candidate(kb, first, SolutionKind.ACL)
     current = {c.device: c.after for c in c1.changes}
     second = _intents(kb, intent(services=[{"protocol": "tcp", "ports": [22]}]))
-    c2 = build_candidate(kb, [(first[0], SolutionKind.ACL), (second[0], SolutionKind.ACL)], current, SolutionKind.ACL)
+    c2 = build_candidate(kb, [(first[0], SolutionKind.ACL), (second[0], SolutionKind.ACL)], current)
     cmds = c2.change("R1").commands
     assert cmds[0] == "ip access-list extended IBN_E0_2_IN_R2"
     assert cmds.index(" ip access-group IBN_E0_2_IN_R2 in") < cmds.index("no ip access-list extended IBN_E0_2_IN_R1")
@@ -74,7 +77,8 @@ def test_vlan_isolation_on_shared_switch(kb):
     kb.hosts["VPC6"] = Host("VPC6", ipaddress.IPv4Address("10.0.1.11"), "HR", "SW1", "Ethernet0/1")
     kb.interfaces["SW1"]["Ethernet0/1"] = type(kb.interfaces["SW1"]["Ethernet0/0"])("SW1", "Ethernet0/1", vlan=1)
     intents = _intents(kb, intent(src={"host": "VPC4"}, dst={"host": "VPC6"}))
-    assert rank(intents, kb)[0].kind == SolutionKind.VLAN
+    with pytest.raises(GenerationError, match="share one L2 segment"):
+        _candidate(kb, intents, SolutionKind.ACL)
     ch = _candidate(kb, intents, SolutionKind.VLAN).change("SW1")
     assert ch.commands[:2] == ["vlan 100", " name IBN_ISOLATE_VPC4"]
     assert " switchport access vlan 1" in ch.rollback and "no vlan 100" in ch.rollback

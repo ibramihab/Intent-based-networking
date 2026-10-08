@@ -1,4 +1,4 @@
-"""End-to-end orchestration. The CLI uses this today; a web UI can call the same methods later."""
+"""End-to-end orchestration used by the web interface."""
 
 from __future__ import annotations
 
@@ -17,22 +17,15 @@ from ibn.control.verifier import Probe, plan_probes
 from ibn.intent.validation import validate_intents
 from ibn.kb.knowledge_base import KnowledgeBase
 from ibn.kb.state import IntentRecord, IntentStatus, StateStore
-from ibn.models.intent import Intent, SolutionKind
+from ibn.models.intent import Intent
 from ibn.models.netconfig import CandidateConfig, DeviceChange, DeviceState
 from ibn.models.report import ValidationReport
 from ibn.translation.generator import GenerationError, build_candidate
-from ibn.translation.selector import rank
 from ibn.validation.validator import Validator
 
 
 class PlanError(Exception):
     pass
-
-
-class Attempt(BaseModel):
-    solution: SolutionKind
-    passed: bool
-    errors: list[str] = Field(default_factory=list)
 
 
 class Plan(BaseModel):
@@ -42,9 +35,7 @@ class Plan(BaseModel):
     created: datetime
     intents: list[Intent] = Field(default_factory=list)
     intent_report: ValidationReport | None = None
-    options: list[dict[str, Any]] = Field(default_factory=list)
-    attempts: list[Attempt] = Field(default_factory=list)
-    chosen: SolutionKind | None = None
+    generation_error: str | None = None
     candidate: CandidateConfig | None = None
     validation: ValidationReport | None = None
     probes: list[dict[str, Any]] = Field(default_factory=list)
@@ -65,24 +56,15 @@ class IBN:
         self.validator = Validator(self.kb)
 
     # ---------------------------------------------------------------- planning
-    def plan_submit(self, raw_intents: list[dict[str, Any]], request: str,
-                    solution: SolutionKind | None = None) -> Plan:
+    def plan_submit(self, raw_intents: list[dict[str, Any]], request: str) -> Plan:
+        """Translate and validate intents whose solution (acl/firewall/vlan) was chosen by the LLM."""
         plan = self._new_plan("submit", request)
         active = self.store.active()
         intents, plan.intent_report = validate_intents(raw_intents, self.kb, active)
         plan.intents = intents
-        if not plan.intent_report.passed:
-            return self._save(plan)
-
-        options = rank(intents, self.kb)
-        plan.options = [vars(o) | {"kind": o.kind.value} for o in options]
-        candidates = [o.kind for o in options if o.feasible and (solution is None or o.kind == solution)]
-        base = [(r.intent, r.solution) for r in active]
-        all_after = [r.intent for r in active] + intents
-        for kind in candidates:  # validator feedback loop: fall back to the next-best solution
-            ok = self._try(plan, base + [(i, kind) for i in intents], all_after, intents, kind)
-            if ok:
-                break
+        if plan.intent_report.passed:
+            self._try(plan, [(r.intent, r.solution) for r in active] + [(i, i.solution) for i in intents],
+                      [r.intent for r in active] + intents, intents)
         return self._save(plan)
 
     def plan_withdraw(self, intent_id: str) -> Plan:
@@ -93,26 +75,28 @@ class IBN:
         plan = self._new_plan("withdraw", f"withdraw {intent_id}")
         plan.intents = [target.intent]
         rest = [r for r in active if r.intent.id != intent_id]
-        self._try(plan, [(r.intent, r.solution) for r in rest], [r.intent for r in rest], [target.intent],
-                  target.solution)
+        self._try(plan, [(r.intent, r.solution) for r in rest], [r.intent for r in rest], [target.intent])
         return self._save(plan)
 
-    def _try(self, plan: Plan, records, active_after: list[Intent], changed: list[Intent],
-             kind: SolutionKind) -> bool:
+    def _try(self, plan: Plan, records, active_after: list[Intent], changed: list[Intent]) -> None:
         current = self.store.managed()
         try:
-            candidate = build_candidate(self.kb, records, current, kind)
+            candidate = build_candidate(self.kb, records, current)
         except GenerationError as exc:
-            plan.attempts.append(Attempt(solution=kind, passed=False, errors=[str(exc)]))
-            return False
-        report = self.validator.validate(candidate, current, active_after, changed,
-                                         title=f"Validation report – {plan.plan_id} ({kind.value})")
-        plan.attempts.append(Attempt(solution=kind, passed=report.passed, errors=[str(e) for e in report.errors()]))
-        plan.candidate, plan.validation, plan.chosen = candidate, report, kind
-        if report.passed:
+            plan.generation_error = str(exc)
+            return
+        plan.candidate = candidate
+        plan.validation = self.validator.validate(candidate, current, active_after, changed,
+                                                  title=f"Validation report – {plan.plan_id}")
+        if plan.validation.passed:
             after = {**current, **{c.device: c.after for c in candidate.changes}}
             plan.probes = [vars(p) for p in plan_probes(self.kb, current, after)]
-        return report.passed
+
+    def feedback(self, plan: Plan) -> list[str]:
+        """Why the Translation & Validation layer rejected a plan – sent back to the LLM."""
+        if plan.generation_error:
+            return [plan.generation_error]
+        return [i.message for i in plan.validation.errors()] if plan.validation else []
 
     def _new_plan(self, kind: str, request: str) -> Plan:
         now = datetime.now(timezone.utc)
@@ -137,7 +121,7 @@ class IBN:
                     (d / sub).mkdir(exist_ok=True)
                     (d / sub / f"{ch.device}.txt").write_text("\n".join(lines) + "\n")
         self.audit.write("plan", plan=plan.plan_id, kind=plan.kind, ok=plan.ok,
-                         intents=[i.summary() for i in plan.intents], solution=plan.chosen)
+                         intents=[i.summary() for i in plan.intents])
         return plan
 
     def load_plan(self, plan_id: str) -> Plan:
@@ -170,7 +154,7 @@ class IBN:
         }, indent=2))
         now = datetime.now(timezone.utc)
         if plan.kind == "submit":
-            records += [IntentRecord(intent=i, solution=plan.chosen, plan_id=plan.plan_id, updated_at=now)
+            records += [IntentRecord(intent=i, solution=i.solution, plan_id=plan.plan_id, updated_at=now)
                         for i in plan.intents]
         else:
             withdrawn = {i.id for i in plan.intents}
@@ -191,7 +175,7 @@ class IBN:
             raise PlanError(f"{plan_id} was never committed")
         if fp.read_text() != self.store.fingerprint():
             raise PlanError("other changes were committed after this plan; withdraw intents instead")
-        reverse = CandidateConfig(solution=plan.chosen, changes=[
+        reverse = CandidateConfig(changes=[
             DeviceChange(device=c.device, platform=c.platform, before=c.after, after=c.before,
                          commands=c.rollback, rollback=c.commands) for c in reversed(plan.candidate.changes)])
         report = self._deployer().deploy(f"{plan_id}-rollback", reverse, [], dry_run=dry_run,

@@ -9,7 +9,8 @@ if anything fails.
 
 ```
  Web GUI ──► Intent Layer ──► Translation & Validation ──► Control Layer ──► EVE-NG (Cisco IOL)
-               │  Gemini        Selector → Generator ⇄ Validator   backup/apply/verify/rollback
+               │  Gemini picks       Generator ⇄ Validator        backup/apply/verify/rollback
+               │  ACL/firewall/VLAN  (rejections go back to Gemini)
                └──────────── Network Knowledge Base (kb/) ─────────────┘
 ```
 
@@ -34,12 +35,17 @@ Your browser opens **http://127.0.0.1:8000**. Press `Ctrl+C` in the terminal to 
 
 | Page | What you do there |
 |---|---|
-| **New intent** | Type the intent, or click an example, and press **Analyze intent**. If the AI needs more detail it asks you; type the answer. You then see the understood intent, the intent checks, why ACL/firewall/VLAN was chosen, the generated config for each router (with its rollback), the validation report, and the ping checks that will run. Finally **Approve – dry run** (touches nothing) or **Approve – deploy LIVE** |
+| **New intent** | Type the intent, or click an example, and press **Analyze intent**. If the AI needs more detail it asks you; type the answer. You then see the understood intent with the solution the AI chose (ACL, firewall or VLAN) and why, the intent checks, the generated config for each router (with its rollback), the validation report, and the ping checks that will run. Finally **Approve – dry run** (touches nothing) or **Approve – deploy LIVE** |
 | **Intents** | Dashboard of all intents and their status. **Withdraw** removes an intent; **Undo last deployment** rolls back the most recent one |
 | **Network** | The knowledge base (groups, hosts, devices, consistency check), **Simulate a flow** to trace a packet, and **Sync configs from devices** |
 | **History** | Audit log of every plan, deployment and rollback, including the exact commands sent |
 
-Without `GEMINI_API_KEY` the page uses the offline keyword parser.
+If the AI's choice can't be built or fails validation, the errors are sent back to the AI
+automatically and it chooses again; the page shows a yellow **"The AI changed its decision"** box.
+To force a mechanism, say it in the sentence ("... using firewall").
+
+Without `GEMINI_API_KEY` the page uses the offline keyword parser, which uses ACL unless the
+sentence names another mechanism.
 **Record dry run as deployed** lets you build up intents without the lab.
 
 ## Lab (EVE-NG) prerequisites for LIVE deployment

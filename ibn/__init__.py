@@ -2,7 +2,7 @@
 
 Layers (see docs/architecture.md):
   intent/       – natural language -> structured, validated, conflict-free intent
-  translation/  – solution selection + vendor-neutral model + vendor drivers
+  translation/  – vendor-neutral model + vendor drivers (the LLM picks the solution)
   validation/   – syntax, semantic, compliance, impact and simulation checks
   control/      – backup, staged rollout, verification, rollback, audit
   kb/           – shared Network Knowledge Base (inventory, topology, policies, state)

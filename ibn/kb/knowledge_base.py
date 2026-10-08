@@ -80,7 +80,6 @@ class Policies:
     vlan_range: tuple[int, int] = (100, 999)
     reserved_vlans: set[int] = field(default_factory=set)
     p2p_convention: bool = False
-    solution_weights: dict[str, int] = field(default_factory=dict)
     deployment: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -91,7 +90,6 @@ class Policies:
             vlan_range=tuple(d.get("vlan_range", [100, 999])),
             reserved_vlans=set(d.get("reserved_vlans", [])),
             p2p_convention=bool(d.get("p2p_convention", False)),
-            solution_weights=d.get("solution_weights", {}),
             deployment=d.get("deployment", {}),
         )
 
@@ -273,7 +271,8 @@ class KnowledgeBase:
         lines += [f"  - {g.name}: {g.subnet}, gateway {g.gateway_device} {g.gateway_interface}"
                   for g in self.groups.values()]
         lines.append("Hosts (name: ip, group):")
-        lines += [f"  - {h.name}: {h.ip}, group {h.group}" for h in self.hosts.values()]
+        lines += [f"  - {h.name}: {h.ip}, group {h.group}" + (f", access switch {h.switch} {h.port}" if h.switch else "")
+                  for h in self.hosts.values()]
         lines.append("Devices:")
         for d in self.devices.values():
             ips = ", ".join(f"{i.name}={i.ip}" for i in self.l3_interfaces(d.name))

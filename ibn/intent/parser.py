@@ -1,7 +1,8 @@
 """Natural language -> structured intent JSON.
 
-`LLMIntentParser` grounds the LLM in the Knowledge Base and asks it to either return intents
-or clarification questions. `RuleBasedParser` is an offline fallback for tests and demos.
+`LLMIntentParser` grounds the LLM in the Knowledge Base and the deployed intents, and asks it to
+return intents (including the enforcement mechanism it chose and why) or clarification questions.
+`RuleBasedParser` is an offline fallback for tests and demos.
 """
 
 from __future__ import annotations
@@ -15,10 +16,14 @@ from ibn.intent.llm import LLMProvider
 from ibn.kb.knowledge_base import KnowledgeBase
 
 SYSTEM_PROMPT = """You are the intent parser of an Intent-Based Networking system.
-Translate the operator's request into vendor-neutral traffic-policy intents.
+Translate the operator's request into vendor-neutral traffic-policy intents and decide how
+each one is enforced.
 
 Network knowledge base:
 {kb}
+
+Intents already deployed:
+{deployed}
 
 Return ONLY a JSON object:
 {{
@@ -31,7 +36,8 @@ Return ONLY a JSON object:
       "services": [{{"protocol": "ip"|"icmp"|"tcp"|"udp", "ports": [<int>, ...]}}],
       "bidirectional": <bool>,
       "priority": <1-1000, default 100>,
-      "preferred_solution": null | "acl" | "firewall" | "vlan"
+      "solution": "acl" | "firewall" | "vlan",
+      "solution_reason": "<one or two sentences: why this mechanism fits>"
     }}
   ],
   "clarifications": ["<question>", ...]
@@ -44,7 +50,19 @@ Rules:
   "web" means tcp 80 and 443.
 - "only X allowed" => a permit intent for X plus a deny intent for all ip, with the permit at higher priority.
 - "between A and B", "isolate A from B", or "in both directions" => bidirectional true.
-- Set preferred_solution only if the operator names a mechanism (ACL, firewall, VLAN).
+- Choose "solution" for every intent:
+  * "acl": extended ACL on the router interface closest to the source. Stateless, smallest blast
+    radius. The default for denying or filtering traffic between routed groups/subnets.
+  * "firewall": Cisco zone-based firewall on the gateway router. Stateful (return traffic is handled
+    automatically) but every routed interface of that router joins a zone. Prefer it for permits of
+    specific services where stateful inspection matters, or when the operator asks for a firewall.
+  * "vlan": move a host into an isolated VLAN. ONLY possible when denying ALL traffic ("ip") between
+    two hosts on the same access switch and subnet. Never for routed groups such as HR <-> Finance.
+  * If the operator names a mechanism, use it. Intents in one request that overlap must use the same
+    solution, and so should a new intent that overrides an overlapping deployed intent (priority is
+    only enforceable within one mechanism).
+- If the system reports that your chosen solution failed translation or validation, read the
+  errors, choose a different solution or adjust the intents, and return the complete JSON again.
 - If an entity is unknown or the request is ambiguous (direction, service, which group),
   return "intents": [] and ask concise questions in "clarifications". Never guess names.
 """
@@ -57,20 +75,28 @@ class ParseResult:
 
 
 class LLMIntentParser:
-    def __init__(self, provider: LLMProvider, kb: KnowledgeBase):
+    def __init__(self, provider: LLMProvider, kb: KnowledgeBase, deployed: list[str] | None = None):
         self.provider = provider
         self.kb = kb
+        self.deployed = deployed or []
         self.history: list[dict[str, str]] = []
 
     def parse(self, text: str) -> ParseResult:
         self.history.append({"role": "user", "text": text})
-        data = self.provider.generate_json(SYSTEM_PROMPT.format(kb=self.kb.llm_context()), self.history)
+        system = SYSTEM_PROMPT.format(kb=self.kb.llm_context(),
+                                      deployed="\n".join(f"  - {d}" for d in self.deployed) or "  (none)")
+        data = self.provider.generate_json(system, self.history)
         self.history.append({"role": "model", "text": json.dumps(data)})
         return ParseResult(intents=list(data.get("intents") or []),
                            clarifications=list(data.get("clarifications") or []))
 
     def answer(self, answers: str) -> ParseResult:
         return self.parse(f"Answers to your questions: {answers}")
+
+    def rejected(self, errors: list[str]) -> ParseResult:
+        """Validator -> LLM feedback: the chosen solution could not be translated or validated."""
+        return self.parse("The Translation & Validation layer rejected your intents:\n- " + "\n- ".join(errors)
+                          + "\nChoose a different solution or adjust the intents and return the complete JSON.")
 
 
 _APPS = {"https": ("tcp", 443), "http": ("tcp", 80), "ssh": ("tcp", 22), "telnet": ("tcp", 23),
@@ -115,7 +141,7 @@ class RuleBasedParser:
         if not services:
             services = [{"protocol": "ip", "ports": []}]
 
-        solution = next((s for s in ("acl", "firewall", "vlan") if re.search(rf"\b{s}\b", low)), None)
+        named = next((s for s in ("acl", "firewall", "vlan") if re.search(rf"\b{s}\b", low)), None)
         return ParseResult(intents=[{
             "description": text.strip(),
             "action": action,
@@ -123,5 +149,6 @@ class RuleBasedParser:
             "destination": names[1][1],
             "services": services,
             "bidirectional": bool(re.search(r"\b(between|isolate|both directions|each other)\b", low)),
-            "preferred_solution": solution,
+            "solution": named or "acl",
+            "solution_reason": f"named in the request ({named})" if named else "offline parser default (acl)",
         }])

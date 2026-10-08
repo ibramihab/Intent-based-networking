@@ -96,10 +96,21 @@ class Intent(BaseModel):
     services: list[Service] = Field(default_factory=lambda: [Service()], min_length=1)
     bidirectional: bool = False
     priority: int = Field(100, ge=1, le=1000, description="higher wins on overlap")
-    preferred_solution: SolutionKind | None = None
+    solution: SolutionKind = Field(SolutionKind.ACL, description="enforcement mechanism, chosen by the LLM")
+    solution_reason: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_fields(cls, data):
+        if isinstance(data, dict) and "preferred_solution" in data:  # intents saved before the LLM chose
+            data = dict(data)
+            legacy = data.pop("preferred_solution")
+            data.setdefault("solution", legacy or SolutionKind.ACL.value)
+        return data
 
     def summary(self) -> str:
         arrow = "<->" if self.bidirectional else "->"
         svcs = " ".join(s.label for s in self.services)
-        return f"{self.action.value.upper()} {self.source.label} {arrow} {self.destination.label} [{svcs}] (prio {self.priority})"
+        return (f"{self.action.value.upper()} {self.source.label} {arrow} {self.destination.label} [{svcs}] "
+                f"via {self.solution.value} (prio {self.priority})")

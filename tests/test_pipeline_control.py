@@ -18,7 +18,7 @@ class FailingConnection(DryRunConnection):
 
 def test_submit_deploy_withdraw_roundtrip(ibn):
     plan = ibn.plan_submit([intent()], "deny HR->Finance")
-    assert plan.ok and plan.chosen.value == "acl"
+    assert plan.ok and plan.intents[0].solution.value == "acl"
     assert (ibn.package_dir(plan.plan_id) / "configs" / "R1.txt").is_file()
     rep = ibn.deploy(plan.plan_id, dry_run=True, record_state=True)
     assert rep.success and rep.devices[0].backup

@@ -1,6 +1,6 @@
 """Validator: syntax, semantic, intent compliance, impact analysis and simulation.
 
-A failing report sends the pipeline back to the Config Generator with the next-best solution.
+A failing report is sent back to the LLM, which picks another solution (Validator -> Generator loop).
 """
 
 from __future__ import annotations

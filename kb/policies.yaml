@@ -18,12 +18,6 @@ reserved_vlans: [1, 1002, 1003, 1004, 1005]
 # Enforce the 10.x.y.0/24 (x<y) point-to-point addressing convention in `ibn kb check`.
 p2p_convention: true
 
-# Solution Selector: base scores per solution (tune to your organisation's preference).
-solution_weights:
-  acl: 70
-  firewall: 55
-  vlan: 60
-
 deployment:
   # Staged rollout: devices are configured one at a time in this role order.
   stage_order: [switch, router]

@@ -89,6 +89,7 @@ const EXAMPLES = [
   "Isolate HR and Finance completely",
   "HR may only reach VPC5 over https",
   "Deny ping from Finance to HR using firewall",
+  "Allow HR to use the Finance web server, track the sessions",
 ];
 $("examples").innerHTML = EXAMPLES.map((e) => `<button type="button">${esc(e)}</button>`).join("");
 $("examples").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => { $("intent-text").value = b.textContent; }));
@@ -130,15 +131,15 @@ async function handleInterpret(res, request) {
   }
   conversation = null;
   $("clarify").classList.add("hidden");
-  await makePlan(res.intents, request, false);
+  await makePlan(res.intents, request, false, res.conversation_id);
 }
 
-async function makePlan(intents, request, raisePriority) {
+async function makePlan(intents, request, raisePriority, conversationId) {
   $("plan-area").innerHTML = `<div class="card"><span class="spinner"></span>Translating and validating…</div>`;
   const plan = await api("POST", "/api/plans", {
-    intents, request, solution: $("solution").value || null, raise_priority: raisePriority,
+    intents, request, raise_priority: raisePriority, conversation_id: conversationId || null,
   });
-  renderPlan(plan, { intents, request });
+  renderPlan(plan, { intents, request, conversationId });
 }
 
 function renderPlan(plan, ctx) {
@@ -146,10 +147,20 @@ function renderPlan(plan, ctx) {
   const isWithdraw = plan.kind === "withdraw";
   let html = "";
 
+  const feedback = plan.llm_feedback || [];
+  if (feedback.length) {
+    html += `<div class="card warn"><h3>The AI changed its decision</h3>
+      ${feedback.map((f) => `<p><b>${esc(f.solutions.join(", "))}</b> was rejected by the Translation &amp; Validation layer:</p>
+        <ul class="issues">${f.errors.map((e) => `<li class="sev-error">${esc(e)}</li>`).join("")}</ul>
+        ${f.note ? `<p class="muted">${esc(f.note)}</p>` : ""}`).join("")}
+      <p class="muted">The errors were sent back to the AI, and the result below is its new answer.</p></div>`;
+  }
+
   html += `<div class="card">${step(1, isWithdraw ? "Intent to withdraw" : "Understood intent")}
-    ${table(["id", "action", "source", "destination", "services", "direction", "priority"],
+    ${table(["id", "action", "source", "destination", "services", "direction", "priority", "solution (AI)", "why"],
       plan.intents.map((i) => [esc(i.id), badge(i.action, i.action === "deny" ? "fail" : "pass"), esc(endpoint(i.source)),
-        esc(endpoint(i.destination)), esc(services(i.services)), i.bidirectional ? "both ways" : "one way", esc(i.priority)]))}
+        esc(endpoint(i.destination)), esc(services(i.services)), i.bidirectional ? "both ways" : "one way", esc(i.priority),
+        `<b>${esc(i.solution)}</b>`, `<span class="muted">${esc(i.solution_reason)}</span>`]))}
   </div>`;
 
   if (plan.intent_report) {
@@ -159,20 +170,14 @@ function renderPlan(plan, ctx) {
         <button id="raise-priority" class="primary">Give the new intent higher priority</button></div>` : ""}</div>`;
   }
 
-  if (plan.options.length) {
-    html += `<div class="card">${step(3, "Solution selection")}
-      ${table(["solution", "feasible", "score", "why"],
-        plan.options.map((o) => [`<b>${esc(o.kind)}</b>${plan.chosen === o.kind ? " ✔" : ""}`,
-          o.feasible ? "yes" : "no", esc(o.score), o.reasons.map(esc).join("<br>")]),
-        (i) => plan.options[i].kind === plan.chosen ? "chosen" : "")}
-      ${plan.attempts.filter((a) => !a.passed).map((a) =>
-        `<p class="sev-warning">Tried <b>${esc(a.solution)}</b> but it failed validation, so the next option was used.</p>`).join("")}
-    </div>`;
+  if (plan.generation_error) {
+    html += `<div class="card">${step(3, "Generated configuration")}
+      <p class="sev-error">The chosen solution cannot be built: ${esc(plan.generation_error)}</p></div>`;
   }
 
   if (plan.candidate) {
     const changes = plan.candidate.changes;
-    html += `<div class="card">${step(4, "Generated configuration")}
+    html += `<div class="card">${step(3, "Generated configuration")}
       ${changes.length ? "" : `<p class="muted">No configuration change is needed.</p>`}
       ${changes.map((c, i) => `<div class="device-config">
         <div class="row"><b>${esc(c.device)}</b><span class="muted">${esc(c.platform)}</span><span class="grow"></span>
@@ -183,11 +188,11 @@ function renderPlan(plan, ctx) {
   }
 
   if (plan.validation) {
-    html += `<div class="card">${step(5, `Validation (${plan.chosen})`)}${stages(plan.validation)}</div>`;
+    html += `<div class="card">${step(4, "Validation")}${stages(plan.validation)}</div>`;
   }
 
   if (plan.probes.length) {
-    html += `<div class="card">${step(6, "Checks after deployment")}
+    html += `<div class="card">${step(5, "Checks after deployment")}
       <ul>${plan.probes.map((p) => `<li>${esc(p.device)}: ping ${esc(p.target)} from ${esc(p.source_interface)} →
         expect <b>${p.expected ? "success" : "failure"}</b> <span class="muted">(${esc(p.purpose)})</span></li>`).join("")}</ul></div>`;
   }
@@ -195,7 +200,7 @@ function renderPlan(plan, ctx) {
   html += `<div class="card">
     <div class="banner ${plan.ok ? "ok" : "bad"}">${plan.ok ? "✔ Ready to deploy" : "✖ Not deployable – see the errors above"}
       <span class="muted"> · plan ${esc(plan.plan_id)}</span></div>
-    ${plan.ok ? `${step(7, "Approve")}
+    ${plan.ok ? `${step(6, "Approve")}
       <p class="muted">Dry run goes through every step without touching the devices. Live pushes to the EVE-NG lab.</p>
       <div class="approve">
         <label><input type="checkbox" id="record-state"> Record dry run as deployed (for testing without the lab)</label>
@@ -214,7 +219,7 @@ function renderPlan(plan, ctx) {
     b.parentElement.querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
   }));
   $("raise-priority")?.addEventListener("click", (e) =>
-    busy(e.target, "Re-planning…", () => makePlan(ctx.intents, ctx.request, true)));
+    busy(e.target, "Re-planning…", () => makePlan(ctx.intents, ctx.request, true, ctx.conversationId)));
   $("deploy-dry")?.addEventListener("click", (e) => deploy(plan.plan_id, false, e.target));
   $("deploy-live")?.addEventListener("click", (e) => {
     if (confirm(`Push plan ${plan.plan_id} to the LIVE devices?`)) deploy(plan.plan_id, true, e.target);

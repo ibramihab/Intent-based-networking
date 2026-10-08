@@ -14,13 +14,13 @@ This document maps each layer of the team's diagram to the code.
 ## Flow
 
 ```
-text ─► parser (Gemini, KB-grounded) ─► clarification questions? ─► JSON intents
+text ─► Gemini (KB + deployed intents in the prompt) ─► clarification questions? ─► JSON intents,
+        each with the solution the LLM chose (acl / firewall / vlan) and its reason
      ─► schema check ─► semantic check ─► conflict check (vs deployed intents)
-     ─► Solution Selector: score ACL / firewall / VLAN, keep the reasons
-     ─► for each feasible option, best first:
-            Config Generator (desired managed state → driver render + rollback)
-            Validator (syntax, semantic, compliance, impact, Batfish)
-            if it passes: stop. If not: try the next option (the feedback arrow in the diagram)
+     ─► Config Generator (desired managed state → driver render + rollback)
+     ─► Validator (syntax, semantic, compliance, impact, Batfish)
+     ─► rejected? the errors go back to Gemini, which picks again (up to 2 rounds;
+        the Validator → Generator arrow in the diagram)
      ─► package artifacts/<plan-id>/ (configs, rollback, reports, probes)
      ─► human approval
      ─► Deployer: per device (staged): backup → apply → check errors → verify running config
@@ -30,10 +30,20 @@ text ─► parser (Gemini, KB-grounded) ─► clarification questions? ─► 
 
 ## Intent Layer (`ibn/intent/`)
 
-* `parser.py`: the system prompt includes the Knowledge Base (groups, hosts, devices), so the
-  LLM can only refer to entities that exist. It returns `{"intents": [...], "clarifications": [...]}`.
-  The GUI shows the questions and sends the operator's answer back in the same conversation. If the
-  JSON fails the schema, the errors are sent back to the LLM once for a repair.
+* `parser.py`: the system prompt includes the Knowledge Base (groups, hosts with their access
+  switch, devices) and the intents already deployed, so the LLM can only refer to entities that
+  exist and can stay consistent with what is running. It returns
+  `{"intents": [...], "clarifications": [...]}`, and every intent carries `solution` and
+  `solution_reason`. The prompt explains when each mechanism fits:
+  * **acl**: the default for filtering between routed groups. Stateless; placed inbound on the
+    interface closest to the source.
+  * **firewall**: Cisco zone-based firewall. Stateful, so it suits permits of specific services
+    where session tracking matters. Every routed interface of that router joins a zone.
+  * **vlan**: only for denying all traffic between two hosts on the same access switch.
+
+  Overlapping intents must use the same mechanism, because precedence only holds within one.
+  The GUI shows the questions and sends the operator's answer back in the same conversation.
+  If the JSON fails the schema, the errors are sent back to the LLM once for a repair.
 * `llm.py`: `LLMProvider` protocol and a Gemini REST client that retries 429/5xx with
   backoff. Swapping in another LLM means writing one class.
 * `validation.py`:
@@ -49,16 +59,15 @@ text ─► parser (Gemini, KB-grounded) ─► clarification questions? ─► 
 
 ## Translation (`ibn/translation/`)
 
-* `selector.py` scores the options. Weights live in `kb/policies.yaml`.
-  * **ACL**: best for stateless denies. Placed inbound on the interface closest to the source.
-  * **Zone-based firewall**: best for permits that need return traffic handled (stateful).
-    The cost is that every routed interface on that router must join a zone.
-  * **VLAN**: only feasible when isolating one host from another on the same access switch.
-    It is never feasible for HR↔Finance, because they are routed subnets.
+There is no separate solution selector: the LLM chooses. The layer below makes sure the choice
+is real:
 
-  An option is marked infeasible when both ends share one L2 segment, a device lacks the
-  capability, or there is no place to enforce it. If the operator names a mechanism, it wins
-  whenever it is feasible.
+* `generator.py` refuses a choice that cannot work, with a reason the LLM can act on: a VLAN
+  for routed subnets or for specific services, an ACL/firewall for two hosts on one L2 segment
+  (the traffic never crosses a router), or nowhere to enforce the rule. The Validator then rejects
+  anything that is syntactically wrong, references something missing, uses a capability the
+  device lacks, breaks another intent, or causes unexplained collateral changes. Either rejection
+  is sent back to the LLM (`IBN.feedback` → `LLMIntentParser.rejected`).
 * `generator.py` builds the vendor-neutral `DeviceState` (`ibn/models/netconfig.py`) for
   every device from **all** active intents plus the new ones. There is one ACL per
   interface/direction and one policy per zone pair, so intents add up instead of overwriting
@@ -108,7 +117,8 @@ and deploying a stale plan is refused.
 
 * Precedence between intents only holds within one mechanism. A high-priority ACL permit
   cannot override a ZBF drop of a lower-priority intent. The validator detects this and
-  rejects the plan; the fix is to withdraw the overlapping intent or use the same solution.
+  rejects the plan; the fix is to withdraw the overlapping intent or use the same solution
+  (the LLM is told about deployed intents and asked to do the latter).
 * Changing a ZBF zone-pair's policy is `no service-policy` + `service-policy` inside a single
   config session, which can drop packets for a very short moment.
 * The simulator models what IBN manages, not dynamic routing or unmanaged ACLs. Batfish is

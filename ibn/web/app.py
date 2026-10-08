@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import threading
+from collections import OrderedDict
 import webbrowser
 from pathlib import Path
 from typing import Any, Callable
@@ -17,15 +18,17 @@ from pydantic import BaseModel
 
 from ibn.config import Settings, load_settings
 from ibn.control.connection import ConnectionError_, connect
-from ibn.intent.llm import GeminiProvider, LLMError
+from ibn.intent.llm import GeminiProvider, LLMError, LLMProvider
 from ibn.intent.parser import LLMIntentParser, RuleBasedParser
 from ibn.intent.validation import parse_intents
 from ibn.kb.knowledge_base import KBError
-from ibn.models.intent import Endpoint, Protocol, SolutionKind
+from ibn.models.intent import Endpoint, Protocol
 from ibn.pipeline import IBN, Plan, PlanError
 from ibn.validation.simulator import Flow, Simulator
 
 STATIC = Path(__file__).parent / "static"
+MAX_CONVERSATIONS = 50
+MAX_LLM_RETRIES = 2
 
 
 class InterpretIn(BaseModel):
@@ -37,7 +40,7 @@ class InterpretIn(BaseModel):
 class PlanIn(BaseModel):
     intents: list[dict[str, Any]]
     request: str
-    solution: SolutionKind | None = None
+    conversation_id: str | None = None  # lets the server send validation errors back to the LLM
     raise_priority: bool = False
 
 
@@ -53,13 +56,18 @@ class SimulateIn(BaseModel):
     port: int | None = None
 
 
+def _gemini(settings: Settings) -> LLMProvider:
+    return GeminiProvider(settings.gemini_api_key, settings.gemini_model)
+
+
 def _plan_json(plan: Plan) -> dict[str, Any]:
     return plan.model_dump(mode="json")
 
 
-def create_app(settings_factory: Callable[[], Settings] = load_settings) -> FastAPI:
+def create_app(settings_factory: Callable[[], Settings] = load_settings,
+               provider_factory: Callable[[Settings], LLMProvider] | None = None) -> FastAPI:
     app = FastAPI(title="Intent-Based Networking")
-    conversations: dict[str, LLMIntentParser] = {}
+    conversations: OrderedDict[str, LLMIntentParser] = OrderedDict()
 
     def core() -> IBN:
         try:
@@ -68,20 +76,28 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             raise HTTPException(500, f"knowledge base error: {exc}") from exc
 
     # ---------------------------------------------------------------- intent layer
+    def remember(cid: str, parser: LLMIntentParser) -> str:
+        conversations[cid] = parser
+        conversations.move_to_end(cid)
+        while len(conversations) > MAX_CONVERSATIONS:
+            conversations.popitem(last=False)
+        return cid
+
     @app.post("/api/interpret")
     def interpret(body: InterpretIn) -> dict[str, Any]:
         ibn = core()
         parser: LLMIntentParser | None = None
         try:
             if body.conversation_id:
-                parser = conversations.pop(body.conversation_id, None)
+                parser = conversations.get(body.conversation_id)
                 if parser is None:
                     raise HTTPException(404, "conversation expired, please start again")
                 result = parser.answer(body.text)
             elif body.offline or not ibn.settings.gemini_api_key:
                 result = RuleBasedParser(ibn.kb).parse(body.text)
             else:
-                parser = LLMIntentParser(GeminiProvider(ibn.settings.gemini_api_key, ibn.settings.gemini_model), ibn.kb)
+                provider = (provider_factory or _gemini)(ibn.settings)
+                parser = LLMIntentParser(provider, ibn.kb, [r.intent.summary() for r in ibn.store.active()])
                 result = parser.parse(body.text)
             syntax = parse_intents(result.intents)[1] if parser and result.intents else None
             if syntax and not syntax.passed:  # one self-repair round with the schema errors
@@ -89,10 +105,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                                       + "; ".join(i.message for i in syntax.issues) + ". Return corrected JSON.")
         except LLMError as exc:
             raise HTTPException(502, str(exc)) from exc
-        cid = None
-        if parser and result.clarifications:
-            cid = uuid4().hex
-            conversations[cid] = parser
+        cid = remember(body.conversation_id or uuid4().hex, parser) if parser else None
         return {"conversation_id": cid, "intents": result.intents, "clarifications": result.clarifications,
                 "parser": "gemini" if parser else "offline"}
 
@@ -100,11 +113,33 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
     @app.post("/api/plans")
     def create_plan(body: PlanIn) -> dict[str, Any]:
         ibn = core()
-        raw = body.intents
-        if body.raise_priority:
+
+        def prioritised(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            if not body.raise_priority:
+                return raw
             top = max((r.intent.priority for r in ibn.store.active()), default=100)
-            raw = [{**r, "priority": min(1000, top + 10)} for r in raw]
-        return _plan_json(ibn.plan_submit(raw, body.request, body.solution))
+            return [{**r, "priority": min(1000, top + 10)} for r in raw]
+
+        plan = ibn.plan_submit(prioritised(body.intents), body.request)
+        parser = conversations.get(body.conversation_id or "")
+        feedback: list[dict[str, Any]] = []
+        # Validator -> Generator loop: a rejected plan goes back to the LLM, which picks again.
+        # Intent-level failures (unknown names, conflicts) are left to the operator.
+        while parser and not plan.ok and plan.intent_report.passed and len(feedback) < MAX_LLM_RETRIES:
+            errors = ibn.feedback(plan)
+            entry = {"plan_id": plan.plan_id, "solutions": sorted({i.solution.value for i in plan.intents}),
+                     "errors": errors}
+            feedback.append(entry)
+            try:
+                result = parser.rejected(errors)
+            except LLMError as exc:
+                entry["note"] = f"could not ask the AI again: {exc}"
+                break
+            if result.clarifications or not result.intents:
+                entry["note"] = "the AI asked: " + " ".join(result.clarifications)
+                break
+            plan = ibn.plan_submit(prioritised(result.intents), body.request)
+        return _plan_json(plan) | {"llm_feedback": feedback}
 
     @app.get("/api/plans/{plan_id}")
     def get_plan(plan_id: str) -> dict[str, Any]:

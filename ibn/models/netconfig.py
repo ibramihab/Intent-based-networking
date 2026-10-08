@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ibn.models.intent import Action, Protocol, SolutionKind
+from ibn.models.intent import Action, Protocol
 
 
 class PolicyRule(BaseModel):
@@ -100,7 +100,6 @@ class DeviceChange(BaseModel):
 
 
 class CandidateConfig(BaseModel):
-    solution: SolutionKind | None
     changes: list[DeviceChange] = Field(default_factory=list)
 
     def change(self, device: str) -> DeviceChange | None:
