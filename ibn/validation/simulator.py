@@ -32,7 +32,10 @@ def build_models(kb: KnowledgeBase, configs: dict[str, str | ConfigTree]) -> dic
             continue
         platform = get_platform(kb.devices[dev].platform)
         tree = cfg if isinstance(cfg, ConfigTree) else platform.parse(cfg)
-        models[dev] = platform.dataplane(tree, dev)
+        model = platform.dataplane(tree, dev)
+        if mgmt := kb.devices[dev].mgmt.interface:  # out-of-band management is not part of the data plane
+            model.interfaces.pop(mgmt, None)
+        models[dev] = model
     return models
 
 

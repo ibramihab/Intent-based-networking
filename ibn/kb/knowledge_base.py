@@ -24,6 +24,7 @@ class Mgmt:
     host: str
     port: int = 22
     transport: str = "ssh"
+    interface: str | None = None  # out-of-band management interface: never simulated or changed
 
 
 @dataclass
@@ -142,7 +143,7 @@ class KnowledgeBase:
                 os_version=str(spec.get("os_version", "")),
                 capabilities=frozenset(spec.get("capabilities", [])),
                 mgmt=Mgmt(host=str(mgmt.get("host", "")), port=int(mgmt.get("port", 22)),
-                          transport=mgmt.get("transport", "ssh")),
+                          transport=mgmt.get("transport", "ssh"), interface=mgmt.get("interface")),
                 credentials={**defaults.get("credentials", {}), **spec.get("credentials", {})},
             )
 
@@ -280,7 +281,8 @@ class KnowledgeBase:
         lines.append("Devices:")
         for d in self.devices.values():
             ips = ", ".join(f"{i.name}={i.ip}" for i in self.l3_interfaces(d.name))
-            lines.append(f"  - {d.name} ({d.role}, {d.platform}){': ' + ips if ips else ''}")
+            mgmt = f" [management interface {d.mgmt.interface}: never change it]" if d.mgmt.interface else ""
+            lines.append(f"  - {d.name} ({d.role}, {d.platform}){': ' + ips if ips else ''}{mgmt}")
         lines.append("Infrastructure (protected) subnets: " + ", ".join(map(str, self.policies.protected_subnets)))
         return "\n".join(lines)
 

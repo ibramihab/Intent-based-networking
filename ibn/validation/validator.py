@@ -159,6 +159,9 @@ class Validator:
                 if kind != "interface" and not name.isdigit() and not name.startswith(prefix):
                     st.issues.append(warning(f"new {kind} '{name}' does not use the '{prefix}' prefix", dev))
 
+            mgmt = kb.devices[dev].mgmt.interface
+            if mgmt and a_ifaces.get(mgmt) != b_ifaces.get(mgmt):
+                st.issues.append(error(f"changes the management interface {mgmt}; IBN could lose access", dev))
             for name, cmds in a_ifaces.items():
                 was = b_ifaces.get(name, [])
                 if "shutdown" in cmds and "shutdown" not in was:

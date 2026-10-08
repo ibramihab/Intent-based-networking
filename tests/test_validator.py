@@ -134,3 +134,19 @@ def test_reviewer_errors_block(check):
     assert not res.report.passed and "wrong interface" in msgs(res)
     res = check(design(), reviewer=lambda d: (_ for _ in ()).throw(RuntimeError("quota")))
     assert res.report.passed and "AI review failed: quota" in msgs(res)
+
+
+def test_management_interface_is_protected_and_not_simulated(kb, root):
+    from ibn.validation.simulator import Simulator, build_models
+    from ibn.models.dataplane import Flow
+    synced = {d: StateStore(root / "kb" / "state").configs(kb)[d] for d in kb.devices}
+    for i, dev in enumerate(("R1", "R3"), start=1):  # both routers on the EVE-NG management cloud
+        synced[dev] += f"interface Ethernet0/3\n ip address 192.168.100.{10 + i} 255.255.255.0\n"
+    sim = Simulator(kb, build_models(kb, synced))
+    assert "Ethernet0/3" not in sim.models["R1"].interfaces
+    assert sim.evaluate(Flow("10.0.1.10", "10.0.3.10", "icmp")).trace[0].endswith("out=Tunnel0")
+    intents = [Intent.model_validate(intent(expectations=[]))]
+    res = Validator(kb).validate(ConfigDesign.model_validate(design(
+        commands=["interface Ethernet0/3", " shutdown"], rollback=["interface Ethernet0/3", " no shutdown"])),
+        ValidationContext(synced, intents, intents), "t")
+    assert "changes the management interface Ethernet0/3" in msgs(res)

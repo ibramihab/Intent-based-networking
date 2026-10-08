@@ -50,18 +50,20 @@ until you tick "I reviewed the AI-generated configuration".
 redesign. The free tier allows only ~20 calls per day per model. Set `GEMINI_MODEL` to another
 model (e.g. `gemini-flash-lite-latest`) when one runs out, or enable billing for real use.
 
-## Lab (EVE-NG) prerequisites for LIVE deployment
+## Connecting EVE-NG
 
-The topology in `kb/topology.yaml` matches the lab diagram: R1–R2–R3, an R1↔R3 GRE tunnel,
-HR 10.0.1.0/24 behind R1/SW1 and Finance 10.0.3.0/24 behind R3/SW3.
-Every device needs management access from the PC running IBN:
+1. The base lab must work first (addresses, GRE tunnel, routing: VPC4 can ping VPC5).
+2. Add a **Management(Cloud0)** network to the lab and connect a spare port of every node to it
+   (routers: `Ethernet0/3`; switches: `Ethernet0/3` as an access port in VLAN 99).
+   Use free addresses in the same subnet as the EVE-NG VM (the IP you open EVE-NG with).
+3. Enable SSH on every node:
 
 ```
-! example for R1 – management via an EVE-NG cloud (pnet0) on a spare interface
+! routers (R1 shown)
 hostname R1
 ip domain-name lab.local
-username admin privilege 15 secret <password>
-enable secret <secret>
+username admin privilege 15 secret cisco123
+enable secret cisco123
 crypto key generate rsa modulus 2048
 ip ssh version 2
 line vty 0 4
@@ -71,13 +73,35 @@ interface Ethernet0/3
  description MGMT
  ip address 192.168.100.11 255.255.255.0
  no shutdown
+
+! switches (SW1 shown): management in its own VLAN, never VLAN 1
+hostname SW1
+ip domain-name lab.local
+username admin privilege 15 secret cisco123
+enable secret cisco123
+crypto key generate rsa modulus 2048
+ip ssh version 2
+line vty 0 4
+ login local
+ transport input ssh
+vlan 99
+ name MGMT
+interface Ethernet0/3
+ switchport mode access
+ switchport access vlan 99
+ no shutdown
+interface Vlan99
+ ip address 192.168.100.21 255.255.255.0
+ no shutdown
 ```
 
-Then put the management IPs in `kb/inventory.yaml` and the credentials in `.env`, and press
-**Sync configs from devices** on the Network page so the AI and the validator work from the real
-running configs instead of the topology baseline. If you only
-have the EVE-NG console, set `transport: telnet` with the EVE host and the node's console port.
-Don't add the management interface to `topology.yaml`.
+4. In `kb/inventory.yaml` set each `host:` to the node's management IP (keep `interface:` as the
+   management interface: IBN never changes it and leaves it out of simulations). Do not add the
+   management ports to `topology.yaml`.
+5. Put the credentials in `.env`, restart, and press **Sync configs from devices** on the Network page.
+
+Quick alternative without a management network: use the EVE-NG telnet console of each node:
+`mgmt: {host: <EVE-NG IP>, port: <console port>, transport: telnet}`.
 
 ## Settings (`.env`)
 
