@@ -1,5 +1,0 @@
-zone-pair security {{ pair.name }} source {{ pair.src_zone }} destination {{ pair.dst_zone }}
-{% if old_policy %}
- no service-policy type inspect {{ old_policy }}
-{% endif %}
- service-policy type inspect {{ pair.policy }}

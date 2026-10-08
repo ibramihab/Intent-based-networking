@@ -1,8 +1,8 @@
-"""Optional Batfish stage. Enabled when `pybatfish` is installed, BATFISH_HOST is set and
-running configs were synced into kb/configs/ (`ibn kb sync`).
+"""Optional Batfish stage. Enabled when `pybatfish` is installed and BATFISH_HOST is set.
 
-The candidate snapshot is the synced running config with the rendered additions appended
-(IOS configs are command streams, so Batfish parses appended blocks normally).
+The snapshot is IBN's full view of every device after the change, so Batfish can parse the
+AI-generated configuration in context and report parse problems and undefined references for any
+technique, including ones the built-in simulator does not model.
 """
 
 from __future__ import annotations
@@ -12,11 +12,10 @@ import tempfile
 from pathlib import Path
 
 from ibn.kb.knowledge_base import KnowledgeBase
-from ibn.models.netconfig import CandidateConfig
 from ibn.models.report import StageResult, error, info, warning
 
 
-def batfish_stage(kb: KnowledgeBase, candidate: CandidateConfig) -> StageResult:
+def batfish_stage(kb: KnowledgeBase, configs_after: dict[str, str]) -> StageResult:
     stage = StageResult(name="Simulation (Batfish)")
     host = os.environ.get("BATFISH_HOST")
     try:
@@ -27,23 +26,11 @@ def batfish_stage(kb: KnowledgeBase, candidate: CandidateConfig) -> StageResult:
         stage.skipped = True
         stage.issues.append(info("skipped: install pybatfish and set BATFISH_HOST to enable"))
         return stage
-    missing = [d for d in kb.interfaces if kb.l3_interfaces(d) and kb.running_config(d) is None]
-    if missing:
-        stage.skipped = True
-        stage.issues.append(info(f"skipped: no synced running config for {', '.join(missing)} (run `ibn kb sync`)"))
-        return stage
-
     with tempfile.TemporaryDirectory() as tmp:
         cfg_dir = Path(tmp) / "configs"
         cfg_dir.mkdir()
-        for dev in kb.interfaces:
-            text = kb.running_config(dev)
-            if text is None:
-                continue
-            change = candidate.change(dev)
-            if change:
-                text += "\n" + "\n".join(c for c in change.commands if not c.lstrip().startswith("no ")) + "\nend\n"
-            (cfg_dir / f"{dev}.cfg").write_text(text)
+        for dev, text in configs_after.items():
+            (cfg_dir / f"{dev}.cfg").write_text(text + "\nend\n")
         try:
             bf = Session(host=host)
             bf.set_network("ibn")

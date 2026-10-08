@@ -23,17 +23,11 @@
   <section id="view-submit" class="view">
     <div class="card">
       <h2>What should the network do?</h2>
-      <p class="muted">Write it in plain English, e.g. <em>“HR may only reach VPC5 over https”</em> or
-        <em>“isolate HR and Finance completely”</em>.
-        The AI also decides how to enforce it (ACL, zone-based firewall or VLAN) and explains why.</p>
-      <textarea id="intent-text" rows="3" placeholder="Block HR from reaching Finance on ssh"></textarea>
+      <p class="muted">Write it in plain English. The AI turns it into a structured intent with testable
+        expectations, then designs the configuration with whatever technique fits (ACLs, firewall, VLANs,
+        routing, NAT, QoS, …). The Validation Layer checks every design before you can approve it.</p>
+      <textarea id="intent-text" rows="3" placeholder="Block HR from reaching the Finance network over SSH"></textarea>
       <div class="row">
-        <label>Parser
-          <select id="parser">
-            <option value="gemini">Gemini (AI)</option>
-            <option value="offline">Offline (keywords)</option>
-          </select>
-        </label>
         <span class="grow"></span>
         <button id="analyze" class="primary">Analyze intent</button>
       </div>
@@ -87,6 +81,13 @@
     <div class="card"><h3>Groups</h3><div id="kb-groups"></div></div>
     <div class="card"><h3>Hosts</h3><div id="kb-hosts"></div></div>
     <div class="card"><h3>Devices</h3><div id="kb-devices"></div></div>
+    <div class="card">
+      <div class="row"><h3>Current configuration (IBN's view)</h3><span class="grow"></span>
+        <select id="cfg-device"></select></div>
+      <p class="muted">What the Validation Layer starts from: synced running config, or a baseline built from the topology,
+        updated after every deployment.</p>
+      <pre class="code" id="cfg-view"></pre>
+    </div>
   </section>
 
   <!-- ============================================================ HISTORY -->

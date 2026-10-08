@@ -11,12 +11,37 @@ protected_subnets:
   - 10.2.3.0/24   # R2-R3
   - 10.1.3.0/24   # R1-R3 tunnel
 
-# VLANs the generator may allocate, and VLANs that must never be used.
+# VLANs the AI may create, and VLANs that must never be created.
 vlan_range: [100, 999]
 reserved_vlans: [1, 1002, 1003, 1004, 1005]
 
 # Enforce the 10.x.y.0/24 (x<y) point-to-point addressing convention in `ibn kb check`.
 p2p_convention: true
+
+# Every object the AI creates (ACLs, class-maps, route-maps, ...) must start with this prefix.
+object_prefix: IBN_
+
+# Commands the AI must never generate (regular expressions, matched per line, case-insensitive).
+forbidden_commands:
+  - pattern: '^\s*(do\s+)?(reload|write|copy|erase|delete|format|squeeze|clear)\b'
+    reason: exec commands are not configuration
+  - pattern: '^\s*no\s+ip\s+routing\b'
+    reason: disables routing on the device
+  - pattern: '^\s*crypto\s+key\s+zeroize'
+    reason: destroys the SSH keys used for management
+  - pattern: '^\s*(no\s+)?(username|enable\s+(secret|password)|aaa)\b'
+    reason: credential and AAA changes are not allowed
+  - pattern: '^\s*(no\s+)?line\s+(vty|con)'
+    reason: could lock IBN out of the device
+  - pattern: '^\s*(no\s+)?(boot|config-register)\b'
+    reason: boot settings
+  - pattern: '^\s*no\s+router\s'
+    reason: removes a whole routing process
+
+# Independent AI review of every design: "error" findings block the plan when true.
+llm_review_blocking: true
+# How many times a rejected design is sent back to the AI for correction.
+max_design_attempts: 3
 
 deployment:
   # Staged rollout: devices are configured one at a time in this role order.

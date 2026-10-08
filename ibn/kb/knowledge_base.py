@@ -10,7 +10,6 @@ from typing import Any
 
 import yaml
 
-from ibn.models.intent import Endpoint, Protocol, Service
 from ibn.models.report import Issue, error, warning
 
 IPv4Net = ipaddress.IPv4Network
@@ -81,6 +80,10 @@ class Policies:
     reserved_vlans: set[int] = field(default_factory=set)
     p2p_convention: bool = False
     deployment: dict[str, Any] = field(default_factory=dict)
+    object_prefix: str = "IBN_"
+    forbidden_commands: list[tuple[re.Pattern, str]] = field(default_factory=list)
+    llm_review_blocking: bool = True
+    max_design_attempts: int = 3
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Policies":
@@ -91,13 +94,18 @@ class Policies:
             reserved_vlans=set(d.get("reserved_vlans", [])),
             p2p_convention=bool(d.get("p2p_convention", False)),
             deployment=d.get("deployment", {}),
+            object_prefix=d.get("object_prefix", "IBN_"),
+            forbidden_commands=[(re.compile(f["pattern"], re.I), f.get("reason", "forbidden"))
+                                for f in d.get("forbidden_commands", [])],
+            llm_review_blocking=bool(d.get("llm_review_blocking", True)),
+            max_design_attempts=int(d.get("max_design_attempts", 3)),
         )
 
-    def probe_services(self) -> list[Service]:
+    def probe_services(self) -> list[tuple[str, int | None]]:
         out = []
         for spec in self.deployment.get("probe_services", ["icmp"]):
             proto, _, port = str(spec).partition("/")
-            out.append(Service(protocol=Protocol(proto), ports=[int(port)] if port else []))
+            out.append((proto, int(port) if port else None))
         return out
 
 
@@ -190,27 +198,23 @@ class KnowledgeBase:
         return next((g for g in self.groups.values()
                      if g.gateway_device == device and g.gateway_interface == interface), None)
 
-    def canonical(self, ep: Endpoint) -> Endpoint:
-        """Return the endpoint with KB-canonical names; raise KBError if it does not exist."""
-        if ep.group:
-            g = self.find_group(ep.group)
-            if not g:
-                raise KBError(f"unknown group {ep.group!r} (known: {', '.join(self.groups)})")
-            return Endpoint(group=g.name)
-        if ep.host:
-            h = self.find_host(ep.host)
-            if not h:
-                raise KBError(f"unknown host {ep.host!r} (known: {', '.join(self.hosts)})")
-            return Endpoint(host=h.name)
-        return ep
-
-    def resolve(self, ep: Endpoint) -> IPv4Net:
-        ep = self.canonical(ep)
-        if ep.group:
-            return self.groups[ep.group].subnet
-        if ep.host:
-            return IPv4Net(f"{self.hosts[ep.host].ip}/32")
-        return IPv4Net(ep.subnet)
+    def endpoint_net(self, text: str) -> IPv4Net:
+        """Resolve an expectation endpoint: host, group, device (its loopback/first IP), IP or CIDR."""
+        t = text.strip()
+        if h := self.find_host(t):
+            return IPv4Net(f"{h.ip}/32")
+        if g := self.find_group(t):
+            return g.subnet
+        dev = next((d for d in self.devices if d.lower() == t.lower()), None)
+        if dev:
+            itfs = self.l3_interfaces(dev)
+            if not itfs:
+                raise KBError(f"device {dev} has no IP address to test against")
+            return IPv4Net(f"{itfs[0].ip.ip}/32")
+        try:
+            return IPv4Net(t, strict=False)
+        except ValueError:
+            raise KBError(f"unknown endpoint {t!r} (use a host, group, device, IP or CIDR)") from None
 
     def locate(self, net: IPv4Net) -> tuple[str, str] | None:
         """Router interface whose connected subnet contains `net` (longest match)."""

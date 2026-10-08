@@ -8,10 +8,12 @@ asks for approval, deploys it in stages to the EVE-NG lab, checks the result, an
 if anything fails.
 
 ```
- Web GUI ──► Intent Layer ──► Translation & Validation ──► Control Layer ──► EVE-NG (Cisco IOL)
-               │  Gemini picks       Generator ⇄ Validator        backup/apply/verify/rollback
-               │  ACL/firewall/VLAN  (rejections go back to Gemini)
-               └──────────── Network Knowledge Base (kb/) ─────────────┘
+ Web GUI ──► Intent Layer (Gemini) ──────────────► Validation Layer ──► Control Layer ──► EVE-NG
+             understand → intent checks →          syntax · semantic ·   backup · apply ·
+             design with ANY technique             rollback · compliance verify · rollback
+             (ACL, firewall, VLAN, routing,        · impact · AI review
+              NAT, QoS, ...)              ◄── rejected designs go back to the AI
+                         └──────── Network Knowledge Base (kb/) ────────┘
 ```
 
 Full design: [docs/architecture.md](docs/architecture.md).
@@ -35,18 +37,18 @@ Your browser opens **http://127.0.0.1:8000**. Press `Ctrl+C` in the terminal to 
 
 | Page | What you do there |
 |---|---|
-| **New intent** | Type the intent, or click an example, and press **Analyze intent**. If the AI needs more detail it asks you; type the answer. You then see the understood intent with the solution the AI chose (ACL, firewall or VLAN) and why, the intent checks, the generated config for each router (with its rollback), the validation report, and the ping checks that will run. Finally **Approve – dry run** (touches nothing) or **Approve – deploy LIVE** |
-| **Intents** | Dashboard of all intents and their status. **Withdraw** removes an intent; **Undo last deployment** rolls back the most recent one |
-| **Network** | The knowledge base (groups, hosts, devices, consistency check), **Simulate a flow** to trace a packet, and **Sync configs from devices** |
-| **History** | Audit log of every plan, deployment and rollback, including the exact commands sent |
+| **New intent** | Type what you want and press **Analyze intent**. The AI asks if anything is unclear, then shows: (1) the structured intent with its **testable expectations**, (2) intent checks, (3) the **AI design** (approach, reasoning, risks, vendor-neutral model), (4) the config, rollback and verify commands per device, (5) the validation report, (6) the post-deployment checks. If the Validation Layer rejected a design, a yellow box shows what was wrong and that the AI fixed it. Then **Approve – dry run** or **Approve – deploy LIVE** |
+| **Intents** | All intents, the technique the AI used, **Withdraw**, **Undo last deployment** |
+| **Network** | Groups, hosts, devices, **Simulate a flow**, **Sync configs from devices**, and each device's current configuration as IBN sees it |
+| **History** | Audit log with the exact commands sent |
 
-If the AI's choice can't be built or fails validation, the errors are sent back to the AI
-automatically and it chooses again; the page shows a yellow **"The AI changed its decision"** box.
-To force a mechanism, say it in the sentence ("... using firewall").
+**Limited verification:** when the AI uses something the built-in simulator cannot model (routing
+changes, NAT, QoS, PBR, …), the page shows a yellow warning and the live button stays disabled
+until you tick "I reviewed the AI-generated configuration".
 
-Without `GEMINI_API_KEY` the page uses the offline keyword parser, which uses ACL unless the
-sentence names another mechanism.
-**Record dry run as deployed** lets you build up intents without the lab.
+**Gemini free tier:** each intent costs about 3 AI calls (understand, design, review), plus one per
+redesign. The free tier allows only ~20 calls per day per model. Set `GEMINI_MODEL` to another
+model (e.g. `gemini-flash-lite-latest`) when one runs out, or enable billing for real use.
 
 ## Lab (EVE-NG) prerequisites for LIVE deployment
 
@@ -71,7 +73,9 @@ interface Ethernet0/3
  no shutdown
 ```
 
-Then put the management IPs in `kb/inventory.yaml` and the credentials in `.env`. If you only
+Then put the management IPs in `kb/inventory.yaml` and the credentials in `.env`, and press
+**Sync configs from devices** on the Network page so the AI and the validator work from the real
+running configs instead of the topology baseline. If you only
 have the EVE-NG console, set `transport: telnet` with the EVE host and the node's console port.
 Don't add the management interface to `topology.yaml`.
 
@@ -87,10 +91,11 @@ Don't add the management interface to `topology.yaml`.
 
 ## For developers
 
-* The web backend is `ibn/web/app.py` (FastAPI JSON API under `/api/...`; interactive docs at
-  `/docs`). The frontend is plain HTML/CSS/JS in `ibn/web/static/`, with no build step.
-* The UI only calls `ibn/pipeline.py`. The layers underneath don't know a web page exists.
-* **Adding a vendor:** implement `VendorDriver` in `ibn/translation/drivers/<platform>.py`
-  (templates in `templates/<platform>/`), `register(...)` it in `drivers/__init__.py`, and set
-  `platform:` in `kb/inventory.yaml`. Nothing else changes.
-* Tests: `pytest -q`
+* `ibn/web/app.py` – API under `/api/...` (interactive docs at `/docs`); `ibn/web/static/` – the page.
+* `ibn/pipeline.py` – the flow; `ibn/intent/` – AI agent and intent checks; `ibn/validation/` – the
+  generic validator and simulator; `ibn/platforms/` – vendor modules; `ibn/control/` – deployment.
+* Guardrails (forbidden commands, protected subnets, object prefix, review blocking, attempts) are in
+  `kb/policies.yaml`.
+* **Adding a vendor:** write one `Platform` module in `ibn/platforms/` and set `platform:` in
+  `kb/inventory.yaml`. The AI writes that vendor's syntax; the validator and control layer are shared.
+* Tests use a scripted fake AI, so they need no API key: `pytest -q`

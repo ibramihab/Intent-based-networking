@@ -13,8 +13,8 @@ from ibn.control.audit import AuditLog
 from ibn.control.connection import ConnectionError_, DeviceConnection, connect
 from ibn.control.verifier import Probe
 from ibn.kb.knowledge_base import KnowledgeBase
-from ibn.models.netconfig import CandidateConfig, DeviceChange
-from ibn.translation.drivers import get_driver
+from ibn.models.design import DeviceConfig
+from ibn.platforms import get_platform
 
 
 class DeviceResult(BaseModel):
@@ -57,16 +57,16 @@ class Deployer:
         self.audit = audit
         self.connector = connector
 
-    def deploy(self, plan_id: str, candidate: CandidateConfig, probes: list[Probe], *, dry_run: bool,
+    def deploy(self, plan_id: str, changes: list[DeviceConfig], probes: list[Probe], *, dry_run: bool,
                auto_rollback: bool = True, save: bool = False) -> DeploymentReport:
         rep = DeploymentReport(deployment_id=f"dep-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{uuid4().hex[:4]}",
                                plan_id=plan_id, dry_run=dry_run, started=datetime.now(timezone.utc))
         self.audit.write("deploy.start", deployment=rep.deployment_id, plan=plan_id, dry_run=dry_run,
-                         devices=[c.device for c in candidate.changes])
+                         devices=[c.device for c in changes])
         conns: dict[str, DeviceConnection] = {}
-        touched: list[tuple[DeviceChange, DeviceResult]] = []
+        touched: list[tuple[DeviceConfig, DeviceResult]] = []
         try:
-            for ch in candidate.changes:  # staged rollout: one device at a time
+            for ch in changes:  # staged rollout: one device at a time
                 res = DeviceResult(device=ch.device)
                 rep.devices.append(res)
                 touched.append((ch, res))
@@ -75,7 +75,7 @@ class Deployer:
             if not all(p.ok for p in rep.probes):
                 raise _Abort("post-deployment reachability verification failed")
             if save and not dry_run:
-                for ch in candidate.changes:
+                for ch in changes:
                     conns[ch.device].save()
                 rep.messages.append("configuration saved (write memory)")
             rep.success = True
@@ -96,9 +96,9 @@ class Deployer:
                              rolled_back=rep.rolled_back, dry_run=dry_run)
         return rep
 
-    def _apply(self, ch: DeviceChange, res: DeviceResult, rep: DeploymentReport,
+    def _apply(self, ch: DeviceConfig, res: DeviceResult, rep: DeploymentReport,
                conns: dict[str, DeviceConnection], dry_run: bool) -> None:
-        driver = get_driver(ch.platform)
+        driver = get_platform(self.kb.devices[ch.device].platform)
         try:
             conn = self.connector(self.kb, ch.device, dry_run)
             conn.open()
@@ -120,9 +120,13 @@ class Deployer:
         if dry_run:
             res.verification.append("dry-run: running-config checks not executed")
         else:
-            problems = [p for chk in driver.verification_checks(ch.before, ch.after)
-                        for p in chk.evaluate(conn.send_command(chk.command))]
-            res.verification = problems or ["running config matches the intended state"]
+            problems = []
+            for chk in ch.verify:
+                if not driver.is_read_only(chk.command):  # validated already; never run anything else
+                    problems.append(f"refused to run non read-only command '{chk.command}'")
+                    continue
+                problems += chk.evaluate(conn.send_command(chk.command))
+            res.verification = problems or [f"{len(ch.verify)} verification command(s) passed"]
             if problems:
                 res.status, res.errors = "failed", problems
                 raise _Abort(f"{ch.device} running config does not match: {problems[0]}")
@@ -139,23 +143,21 @@ class Deployer:
                 conn = self.connector(self.kb, p.device, False)
                 conn.open()
                 conns[p.device] = conn
-            driver = get_driver(self.kb.devices[p.device].platform)
+            driver = get_platform(self.kb.devices[p.device].platform)
             actual = driver.ping_succeeded(conn.send_command(driver.ping_command(p.target, p.source_interface)))
             rep.probes.append(ProbeResult(probe=str(p), expected=p.expected, actual=actual, ok=actual == p.expected))
 
-    def _rollback(self, touched: list[tuple[DeviceChange, DeviceResult]], conns: dict[str, DeviceConnection],
+    def _rollback(self, touched: list[tuple[DeviceConfig, DeviceResult]], conns: dict[str, DeviceConnection],
                   dry_run: bool, rep: DeploymentReport) -> None:
         rep.rolled_back = True
         for ch, res in reversed(touched):
             conn = conns.get(ch.device)
             if conn is None:
                 continue
-            driver = get_driver(ch.platform)
+            driver = get_platform(self.kb.devices[ch.device].platform)
             errors = driver.command_errors(conn.send_config(ch.rollback))
-            problems = [] if dry_run else [p for chk in driver.verification_checks(ch.after, ch.before)
-                                           for p in chk.evaluate(conn.send_command(chk.command))]
-            res.status = "rollback_failed" if errors or problems else "rolled_back"
-            res.errors += [f"rollback: {e}" for e in errors + problems]
+            res.status = "rollback_failed" if errors else "rolled_back"
+            res.errors += [f"rollback: {e}" for e in errors]
             self.audit.write("device.rollback", deployment=rep.deployment_id, device=ch.device,
                              commands=ch.rollback, ok=res.status == "rolled_back")
         rep.messages.append("rolled back all touched devices (reverse order)")

@@ -7,7 +7,7 @@ import os
 from typing import Protocol
 
 from ibn.kb.knowledge_base import Device, KnowledgeBase
-from ibn.translation.drivers import get_driver
+from ibn.platforms import get_platform
 
 
 class ConnectionError_(Exception):
@@ -28,7 +28,7 @@ class NetmikoConnection:
     def __init__(self, device: Device):
         self.name = device.name
         self.device = device
-        self.driver = get_driver(device.platform)
+        self.driver = get_platform(device.platform)
         self._conn = None
 
     def _cred(self, key: str) -> str | None:

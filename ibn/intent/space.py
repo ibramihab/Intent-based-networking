@@ -1,4 +1,4 @@
-"""Traffic spaces: the set of flows an intent talks about. Used for conflicts and impact analysis."""
+"""Expectation flow spaces: shared by conflict detection, intent compliance and impact analysis."""
 
 from __future__ import annotations
 
@@ -6,51 +6,64 @@ import ipaddress
 from dataclasses import dataclass
 
 from ibn.kb.knowledge_base import KnowledgeBase
-from ibn.models.intent import Intent, Protocol
+from ibn.models.dataplane import Flow
+from ibn.models.intent import Expectation, Intent
+
+ANY_SAMPLES = (("icmp", None), ("tcp", 443))  # what "all traffic" is tested with
 
 
 @dataclass(frozen=True)
-class TrafficSpace:
+class FlowSpace:
     src: ipaddress.IPv4Network
     dst: ipaddress.IPv4Network
-    protocol: Protocol
-    ports: frozenset[int]
+    protocol: str  # any | icmp | tcp | udp
+    port: int | None
+    allow: bool
+    priority: int
+    intent_id: str
+    label: str
 
-    def overlaps(self, other: "TrafficSpace") -> bool:
-        if not (self.src.overlaps(other.src) and self.dst.overlaps(other.dst)):
-            return False
-        if Protocol.IP in (self.protocol, other.protocol):
-            return True
-        if self.protocol != other.protocol:
-            return False
-        return not self.ports or not other.ports or bool(self.ports & other.ports)
+    def matches(self, flow: Flow) -> bool:
+        return (ipaddress.IPv4Address(flow.src) in self.src and ipaddress.IPv4Address(flow.dst) in self.dst
+                and self.protocol in ("any", flow.protocol) and self.port in (None, flow.port))
 
-    def contains(self, other: "TrafficSpace") -> bool:
-        if not (other.src.subnet_of(self.src) and other.dst.subnet_of(self.dst)):
-            return False
-        if self.protocol != Protocol.IP and self.protocol != other.protocol:
-            return False
-        return not self.ports or (bool(other.ports) and other.ports <= self.ports)
+    def overlaps(self, other: "FlowSpace") -> bool:
+        return (self.src.overlaps(other.src) and self.dst.overlaps(other.dst)
+                and ("any" in (self.protocol, other.protocol) or self.protocol == other.protocol)
+                and (self.port is None or other.port is None or self.port == other.port))
 
-    def matches(self, src_ip: str, dst_ip: str, protocol: Protocol, port: int | None) -> bool:
-        if ipaddress.IPv4Address(src_ip) not in self.src or ipaddress.IPv4Address(dst_ip) not in self.dst:
-            return False
-        if self.protocol != Protocol.IP and self.protocol != protocol:
-            return False
-        return not self.ports or port in self.ports
+    def contains(self, other: "FlowSpace") -> bool:
+        return (other.src.subnet_of(self.src) and other.dst.subnet_of(self.dst)
+                and self.protocol in ("any", other.protocol) and self.port in (None, other.port))
 
+    @property
+    def specificity(self) -> tuple[int, int, int]:
+        return (self.port is not None, self.protocol != "any", self.src.prefixlen + self.dst.prefixlen)
 
-def spaces(intent: Intent, kb: KnowledgeBase) -> list[TrafficSpace]:
-    src, dst = kb.resolve(intent.source), kb.resolve(intent.destination)
-    out = []
-    for svc in intent.services:
-        out.append(TrafficSpace(src, dst, svc.protocol, frozenset(svc.ports)))
-        if intent.bidirectional:
-            out.append(TrafficSpace(dst, src, svc.protocol, frozenset(svc.ports)))
-    return out
+    @property
+    def precedence(self) -> tuple:
+        return (self.priority, self.specificity)
 
 
-def specificity(space: TrafficSpace) -> tuple[int, int, int, int]:
-    """Higher = more specific. Used for rule ordering and conflict resolution alike."""
-    return (len(space.ports) > 0, space.protocol != Protocol.IP, space.src.prefixlen + space.dst.prefixlen,
-            -len(space.ports))
+def space(exp: Expectation, intent: Intent, kb: KnowledgeBase) -> FlowSpace:
+    return FlowSpace(kb.endpoint_net(exp.src), kb.endpoint_net(exp.dst), exp.protocol, exp.port,
+                     exp.expect == "allow", intent.priority, intent.id, exp.label)
+
+
+def spaces(intent: Intent, kb: KnowledgeBase) -> list[FlowSpace]:
+    return [space(e, intent, kb) for e in intent.expectations]
+
+
+def sample_flows(sp: FlowSpace, kb: KnowledgeBase) -> list[Flow]:
+    src, dst = kb.representative_ip(sp.src), kb.representative_ip(sp.dst)
+    if sp.protocol == "any":
+        return [Flow(src, dst, p, port) for p, port in ANY_SAMPLES]
+    if sp.protocol in ("tcp", "udp") and sp.port is None:
+        return [Flow(src, dst, sp.protocol, 443 if sp.protocol == "tcp" else 53)]
+    return [Flow(src, dst, sp.protocol, sp.port)]
+
+
+def intended(flow: Flow, all_spaces: list[FlowSpace]) -> FlowSpace | None:
+    """The expectation that governs a flow: highest priority, then most specific."""
+    matching = [s for s in all_spaces if s.matches(flow)]
+    return max(matching, key=lambda s: s.precedence) if matching else None

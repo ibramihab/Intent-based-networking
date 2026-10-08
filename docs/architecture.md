@@ -1,127 +1,87 @@
 # Architecture
 
-This document maps each layer of the team's diagram to the code.
-
-| Diagram layer | Code | Status |
-|---|---|---|
-| Interface Layer (Web UI) | `ibn/web/` (FastAPI API + single-page GUI) on top of `ibn/pipeline.py` | done (authentication/RBAC still to do) |
-| Intent Layer | `ibn/intent/` | done (Gemini + offline parser) |
-| Translation & Validation Layer | `ibn/translation/`, `ibn/validation/` | **main focus** |
-| Control Layer | `ibn/control/` | **main focus** |
-| Infrastructure Layer | EVE-NG, Cisco IOL; described in `kb/inventory.yaml` | lab |
-| Network Knowledge Base | `kb/*.yaml`, `ibn/kb/` | done |
+| Diagram layer | Code |
+|---|---|
+| Interface Layer (Web UI) | `ibn/web/` – FastAPI JSON API + single-page GUI |
+| Intent Layer | `ibn/intent/` – Gemini agent: understand → validate intent → design config (any technique) |
+| Validation Layer | `ibn/validation/` + `ibn/platforms/` – generic checks of whatever the AI produced |
+| Control Layer | `ibn/control/` – Netmiko, backup, staged rollout, verification, rollback, audit |
+| Infrastructure Layer | EVE-NG, Cisco IOL; described in `kb/inventory.yaml` |
+| Network Knowledge Base | `kb/*.yaml`, `ibn/kb/` – inventory, topology, policies, IBN's view of each device config |
 
 ## Flow
 
 ```
-text ─► Gemini (KB + deployed intents in the prompt) ─► clarification questions? ─► JSON intents,
-        each with the solution the LLM chose (acl / firewall / vlan) and its reason
-     ─► schema check ─► semantic check ─► conflict check (vs deployed intents)
-     ─► Config Generator (desired managed state → driver render + rollback)
-     ─► Validator (syntax, semantic, compliance, impact, Batfish)
-     ─► rejected? the errors go back to Gemini, which picks again (up to 2 rounds;
-        the Validator → Generator arrow in the diagram)
-     ─► package artifacts/<plan-id>/ (configs, rollback, reports, probes)
-     ─► human approval
-     ─► Deployer: per device (staged): backup → apply → check errors → verify running config
-        ─► reachability probes ─► success: commit state | failure: roll back in reverse order
-     ─► deployment report + audit log
+operator text
+  └─► Intent Layer (Gemini)
+        1. understand: structured intent = description, category, requirements, scope,
+           testable expectations (src, dst, protocol, port, allow|deny), priority
+           – ambiguous? → questions back to the operator
+        2. intent checks (deterministic): schema, entities exist, guardrails,
+           conflicts with deployed intents (overriding one needs confirmation)
+        3. design: any technique → vendor-neutral model → device CLI + rollback + verify commands
+  └─► Validation Layer (generic, technique-agnostic)
+        structure · syntax · semantic · rollback · intent compliance · impact · AI review · Batfish
+        rejected? → exact errors go back to the AI, which redesigns (max_design_attempts)
+  └─► validated package artifacts/<plan-id>/ + report → human approval
+  └─► Control Layer: per device (staged): backup → apply → command errors → AI verify commands
+        → reachability probes → success: update IBN's view | failure: rollback in reverse order
+  └─► deployment report + audit log
 ```
 
 ## Intent Layer (`ibn/intent/`)
 
-* `parser.py`: the system prompt includes the Knowledge Base (groups, hosts with their access
-  switch, devices) and the intents already deployed, so the LLM can only refer to entities that
-  exist and can stay consistent with what is running. It returns
-  `{"intents": [...], "clarifications": [...]}`, and every intent carries `solution` and
-  `solution_reason`. The prompt explains when each mechanism fits:
-  * **acl**: the default for filtering between routed groups. Stateless; placed inbound on the
-    interface closest to the source.
-  * **firewall**: Cisco zone-based firewall. Stateful, so it suits permits of specific services
-    where session tracking matters. Every routed interface of that router joins a zone.
-  * **vlan**: only for denying all traffic between two hosts on the same access switch.
+* `agent.py` keeps two conversations with the LLM: *understand* (with the operator's answers)
+  and *design* (with the Validation Layer's rejections). Prompts are in `prompts.py`.
+* The design prompt receives the topology, every device's current configuration (IBN's view) and
+  the deployed intents with the commands they own, so the AI can extend existing objects instead
+  of conflicting with them (e.g. one ACL per interface direction).
+* The AI may use **any technique**. It must return a vendor-neutral model, per-device commands,
+  exact rollback commands and read-only verification commands, and name new objects with the
+  `object_prefix` (default `IBN_`).
+* `validation.py` checks the intent before any design: schema, entities, expectation endpoints,
+  guardrails (no blocking between protected infrastructure subnets) and conflicts. A new
+  expectation that contradicts a deployed intent needs the operator's explicit override.
+* `llm.py`: provider interface + Gemini client (retries 429/5xx). Swap LLMs by adding a provider.
 
-  Overlapping intents must use the same mechanism, because precedence only holds within one.
-  The GUI shows the questions and sends the operator's answer back in the same conversation.
-  If the JSON fails the schema, the errors are sent back to the LLM once for a repair.
-* `llm.py`: `LLMProvider` protocol and a Gemini REST client that retries 429/5xx with
-  backoff. Swapping in another LLM means writing one class.
-* `validation.py`:
-  * **syntax**: pydantic schema in `ibn/models/intent.py`: required fields, types, port
-    ranges, ports only with tcp/udp
-  * **semantic**: entities exist (names normalised to their KB spelling), source and
-    destination don't overlap, and the guardrail is enforced: no denying traffic between
-    protected infrastructure subnets
-  * **conflicts**: traffic-space overlap against deployed intents and the rest of the same
-    request. Opposite actions must be decided by priority or by specificity, using the same
-    precedence function the generator uses. Otherwise it's an error, and the GUI offers to
-    raise the new intent's priority.
+## Validation Layer (`ibn/validation/`, `ibn/platforms/`)
 
-## Translation (`ibn/translation/`)
+The key idea: the validator does not need to know which technique the AI chose. It parses the
+configuration, applies it to IBN's view of each device (`ConfigTree`, which replays config-mode
+commands the way IOS does), and checks the result.
 
-There is no separate solution selector: the LLM chooses. The layer below makes sure the choice
-is real:
-
-* `generator.py` refuses a choice that cannot work, with a reason the LLM can act on: a VLAN
-  for routed subnets or for specific services, an ACL/firewall for two hosts on one L2 segment
-  (the traffic never crosses a router), or nowhere to enforce the rule. The Validator then rejects
-  anything that is syntactically wrong, references something missing, uses a capability the
-  device lacks, breaks another intent, or causes unexplained collateral changes. Either rejection
-  is sent back to the LLM (`IBN.feedback` → `LLMIntentParser.rejected`).
-* `generator.py` builds the vendor-neutral `DeviceState` (`ibn/models/netconfig.py`) for
-  every device from **all** active intents plus the new ones. There is one ACL per
-  interface/direction and one policy per zone pair, so intents add up instead of overwriting
-  each other. Rules are ordered by priority, then specificity, then age.
-* Changed objects get a new revision name (`IBN_E0_2_IN_R3`). The update order is: define
-  the new object → rebind → delete the old one. This is hitless.
-* `drivers/cisco_ios.py` renders the before→after transition with Jinja templates. The
-  rollback is the after→before transition, so it is exact by construction.
-
-## Validation (`ibn/validation/`)
-
-| stage | checks |
+| Stage | What it checks |
 |---|---|
-| Syntax | every rendered line, config and rollback, matches the IOS grammar for what IBN emits. Addresses, wildcards (contiguous, no host bits), ports and VLAN ranges are checked too |
-| Semantic | interfaces exist; references resolve (binding → ACL, zone-pair → zone); every routed interface is zoned; device capabilities; IP overlap / duplicates in the KB; VLAN reserved/range/collision; against synced running configs: ACL name collisions and an unmanaged ACL already on the interface |
-| Intent compliance | the built-in simulator checks that every active intent, not just the new ones, behaves as the intent model says after the change |
-| Impact analysis | simulates every endpoint pair × probe services before and after the change. Each changed flow must be explained by an intent that was added or withdrawn; anything else is reported as *collateral*. A change to infrastructure↔infrastructure traffic fails the guardrail |
-| Simulation (Batfish) | optional. Runs `initIssues` and `undefinedReferences` on the synced running configs plus the candidate |
+| Design structure | devices exist, platform supported, rollback present, verify commands read-only, neutral model present |
+| Syntax | platform grammar (any IOS command: modes, indentation, ACL entries, addresses/wildcards/masks, ports, VLAN ids, interface names) + `forbidden_commands` guardrails |
+| Semantic | interfaces exist; IP duplicates/overlap; a subnet reused on unconnected devices; VLAN reserved/range/collision; references (ACL, class-map, policy-map, zone, route-map, prefix-list, object-group, interface) defined; nothing deleted while still referenced; infrastructure interfaces not shut; naming prefix |
+| Rollback check | config → apply commands → apply rollback must equal the original config |
+| Intent compliance | every expectation (new **and** already deployed) simulated on the resulting config, with priority/specificity precedence |
+| Impact analysis | all endpoint pairs × probe services simulated before/after; unexplained changes = collateral; infrastructure flows changing = error |
+| AI review | an independent LLM review of the change; `error` findings block when `llm_review_blocking: true` |
+| Batfish | optional: parse issues and undefined references on the full post-change configs |
 
-The simulator (`simulator.py`) follows the shortest L3 path between routers, so HR↔Finance
-goes over the tunnel. It models IBN ACLs (inbound and outbound), ZBF zone-pair semantics
-(zoned↔unzoned is dropped, intra-zone passes, class-default passes) and VLAN isolation.
+**Simulator coverage.** The platform parser turns config into a vendor-neutral data-plane model
+(`ibn/models/dataplane.py`): interface addresses/shutdown, ACLs (named, numbered, standard,
+extended, port operators, sequence order), zone-based firewall, null routes, access VLANs.
+Features outside that model (routing protocols, static next-hop routes, PBR, NAT, QoS,
+object-groups, …) are reported as **limited verification**. They are not blocked, but the GUI
+requires an explicit acknowledgement before a live deployment.
 
-## Control (`ibn/control/`)
+**Adding a vendor** = one module in `ibn/platforms/` implementing `Platform`: syntax check,
+config → data-plane model, references, unmodeled features, baseline config, ping. Everything
+else is shared.
 
-* `connection.py`: Netmiko over SSH or telnet (EVE-NG console), plus a `DryRunConnection`.
-  Credentials come from environment variables whose names are listed in the inventory.
-* `deployer.py`: staged rollout, one device at a time, switches first and then routers
-  (`deployment.stage_order`). Each device is backed up (`backups/<deployment>/<dev>.cfg`),
-  configured, and its output checked for `% Invalid`/`% Incomplete`/…. The running config is
-  then verified with driver `Check`s. After all devices, the reachability probes run. On any
-  failure, every touched device is rolled back in reverse order and the rollback is verified.
-* `verifier.py` picks the probes automatically. It searches router-sourced pings whose
-  simulated result changes because of the deployment, for example R3 pinging VPC4 while the
-  reply crosses the new R1 ACL, and adds one control ping that must keep working. Expected
-  results come from the simulator.
-* `audit.py`: JSON-lines audit log (`logs/audit.jsonl`). The deployment report is saved next
-  to the plan.
+## Control Layer (`ibn/control/`)
+
+* Netmiko over SSH or telnet (EVE-NG console); a dry-run connection for testing.
+* Staged rollout (switches, then routers), backup per device, command error detection, the AI's
+  verify commands (refused unless read-only), simulator-chosen ping probes, reverse-order
+  rollback on any failure, audit log, deployment report saved next to the plan.
 
 ## State
 
-`kb/state/intents.json` holds the intent records and their status. `kb/state/managed.json`
-holds what IBN currently owns on each device. Every plan records a fingerprint of this state,
-and deploying a stale plan is refused.
-
-## Known limitations / next steps
-
-* Precedence between intents only holds within one mechanism. A high-priority ACL permit
-  cannot override a ZBF drop of a lower-priority intent. The validator detects this and
-  rejects the plan; the fix is to withdraw the overlapping intent or use the same solution
-  (the LLM is told about deployed intents and asked to do the latter).
-* Changing a ZBF zone-pair's policy is `no service-policy` + `service-policy` inside a single
-  config session, which can drop packets for a very short moment.
-* The simulator models what IBN manages, not dynamic routing or unmanaged ACLs. Batfish is
-  the high-fidelity option.
-* Next intent types: connectivity (static/OSPF/GRE selection), QoS. Next: telemetry
-  (SNMP/syslog) feeding verification, and authentication/RBAC for the web UI.
+`kb/state/intents.json` holds intent records with the commands each intent deployed.
+`kb/state/configs.json` holds IBN's view of every device. It starts from a synced running config
+(`Sync configs from devices`) or a baseline rendered from the topology, and is updated by every
+deployment, rollback and sync. Plans record a state fingerprint; stale plans are refused.

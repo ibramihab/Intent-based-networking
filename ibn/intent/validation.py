@@ -1,5 +1,6 @@
-"""Intent Layer validation: syntax (schema), semantics (entities exist, no contradictions)
-and conflict detection against intents that are already deployed."""
+"""Intent Layer validation of the AI's structured intent, before any configuration is designed:
+syntax (schema), semantics (entities exist, no contradictions, guardrails) and conflicts with
+intents that are already deployed."""
 
 from __future__ import annotations
 
@@ -7,11 +8,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ibn.intent.space import spaces, specificity
+from ibn.intent.space import FlowSpace, space
 from ibn.kb.knowledge_base import KBError, KnowledgeBase
 from ibn.kb.state import IntentRecord
-from ibn.models.intent import Action, Intent
-from ibn.models.report import Issue, StageResult, ValidationReport, error, info, warning
+from ibn.models.intent import Intent
+from ibn.models.report import StageResult, ValidationReport, error, info, warning
 
 
 def parse_intents(raw: list[dict[str, Any]]) -> tuple[list[Intent], StageResult]:
@@ -30,75 +31,84 @@ def parse_intents(raw: list[dict[str, Any]]) -> tuple[list[Intent], StageResult]
     return intents, stage
 
 
-def semantic_check(intents: list[Intent], kb: KnowledgeBase) -> tuple[list[Intent], StageResult]:
-    """Entities exist (names are canonicalised), and the intent is not self-contradictory."""
+def semantic_check(intents: list[Intent], kb: KnowledgeBase) -> StageResult:
     stage = StageResult(name="Intent semantics")
-    out = []
     for it in intents:
-        try:
-            it = it.model_copy(update={"source": kb.canonical(it.source), "destination": kb.canonical(it.destination)})
-            src, dst = kb.resolve(it.source), kb.resolve(it.destination)
-        except KBError as exc:
-            stage.issues.append(error(f"{it.id}: {exc}"))
-            continue
+        sc = it.scope
+        for name in sc.groups:
+            if not kb.find_group(name):
+                stage.issues.append(error(f"{it.id}: unknown group {name!r} (known: {', '.join(kb.groups)})"))
+        for name in sc.hosts:
+            if not kb.find_host(name):
+                stage.issues.append(error(f"{it.id}: unknown host {name!r} (known: {', '.join(kb.hosts)})"))
+        for name in sc.devices:
+            if not any(d.lower() == name.lower() for d in kb.devices):
+                stage.issues.append(error(f"{it.id}: unknown device {name!r} (known: {', '.join(kb.devices)})"))
+        if not it.expectations:
+            stage.issues.append(warning(f"{it.id}: no testable expectations; compliance will rely on the AI "
+                                        "review and post-deployment checks"))
         protected = kb.policies.protected_subnets
-        if it.action == Action.DENY and any(src.overlaps(n) for n in protected) \
-                and any(dst.overlaps(n) for n in protected):
-            stage.issues.append(error(f"{it.id}: guardrail: denying traffic between protected infrastructure "
-                                      f"subnets ({src} -> {dst}) is not allowed"))
-        if src.overlaps(dst):
-            stage.issues.append(error(f"{it.id}: source {src} and destination {dst} overlap"))
-        for ep, net in ((it.source, src), (it.destination, dst)):
-            if ep.subnet and not kb.locate(net) and not any(net.subnet_of(g.subnet) for g in kb.groups.values()):
-                stage.issues.append(warning(f"{it.id}: subnet {net} is not attached to any known router interface"))
-        labels = [s.label for s in it.services]
-        if len(set(labels)) != len(labels):
-            stage.issues.append(warning(f"{it.id}: duplicate services {labels}"))
-        out.append(it)
-    return out, stage
-
-
-def detect_conflicts(new: list[Intent], existing: list[IntentRecord], kb: KnowledgeBase) -> StageResult:
-    """Overlapping traffic with opposite actions must be resolvable by priority or specificity."""
-    stage = StageResult(name="Conflict detection")
-    others = [(r.intent, "deployed") for r in existing]
-    for idx, a in enumerate(new):
-        candidates = others + [(b, "same request") for b in new[idx + 1:]]
-        for b, where in candidates:
-            stage.issues += _compare(a, b, where, kb)
+        for exp in it.expectations:
+            try:
+                sp = space(exp, it, kb)
+            except KBError as exc:
+                stage.issues.append(error(f"{it.id}: expectation '{exp.label}': {exc}"))
+                continue
+            if sp.src.overlaps(sp.dst):
+                stage.issues.append(error(f"{it.id}: expectation '{exp.label}': source and destination overlap"))
+            if not sp.allow and any(sp.src.overlaps(n) for n in protected) and any(sp.dst.overlaps(n) for n in protected):
+                stage.issues.append(error(f"{it.id}: guardrail: blocking traffic between protected infrastructure "
+                                          f"subnets is not allowed ('{exp.label}')"))
     return stage
 
 
-def _compare(a: Intent, b: Intent, where: str, kb: KnowledgeBase) -> list[Issue]:
-    sa, sb = spaces(a, kb), spaces(b, kb)
-    if not any(x.overlaps(y) for x in sa for y in sb):
-        return []
-    tag = f"{a.id} vs {b.id} ({where}: {b.summary()})"
-    if a.action == b.action:
-        if all(any(y.contains(x) for y in sb) for x in sa):
-            return [warning(f"{tag}: redundant, already covered")]
-        return [info(f"{tag}: overlapping, same action")]
-    if a.priority != b.priority:
-        winner = a if a.priority > b.priority else b
-        return [warning(f"{tag}: opposite actions overlap; {winner.id} wins by priority")]
-    order = {(specificity(x) > specificity(y)) - (specificity(x) < specificity(y))
-             for x in sa for y in sb if x.overlaps(y)}
-    if order in ({1}, {-1}):
-        winner = a if order == {1} else b
-        return [warning(f"{tag}: opposite actions overlap; more specific {winner.id} takes precedence")]
-    return [error(f"{tag}: opposite actions on partially overlapping traffic with equal priority - "
-                  "set a priority or narrow one intent")]
+def detect_conflicts(new: list[Intent], existing: list[IntentRecord], kb: KnowledgeBase,
+                     allow_override: bool = False) -> StageResult:
+    """Opposite expectations on overlapping traffic must be decided by priority or specificity.
+    Overriding an already deployed intent always needs the operator's explicit confirmation."""
+    stage = StageResult(name="Conflict detection")
+    old = [(sp, f"deployed {r.intent.id}") for r in existing for sp in _spaces(r.intent, kb)]
+    fresh = [(sp, "same request") for it in new for sp in _spaces(it, kb)]
+    for idx, (a, _) in enumerate(fresh):
+        for b, where in old + fresh[idx + 1:]:
+            if a.intent_id == b.intent_id or a.allow == b.allow or not a.overlaps(b):
+                continue
+            tag = f"'{a.label}' ({a.intent_id}) vs '{b.label}' ({where})"
+            if where.startswith("deployed"):
+                if allow_override and a.priority > b.priority:
+                    stage.issues.append(warning(f"{tag}: overrides the deployed intent (confirmed by the operator)"))
+                else:
+                    stage.issues.append(error(f"{tag}: would override deployed intent {b.intent_id}; "
+                                              "confirm the override or rephrase the request"))
+            elif a.priority != b.priority:
+                winner = a if a.priority > b.priority else b
+                stage.issues.append(warning(f"{tag}: opposite expectations overlap; {winner.intent_id} wins by priority"))
+            elif a.specificity != b.specificity and (a.contains(b) or b.contains(a)):
+                stage.issues.append(info(f"{tag}: the more specific expectation takes precedence"))
+            else:
+                stage.issues.append(error(f"{tag}: contradictory expectations with equal priority - "
+                                          "raise the priority of the one that should win"))
+    return stage
 
 
-def validate_intents(raw: list[dict[str, Any]], kb: KnowledgeBase,
-                     existing: list[IntentRecord]) -> tuple[list[Intent], ValidationReport]:
+def _spaces(intent: Intent, kb: KnowledgeBase) -> list[FlowSpace]:
+    out = []
+    for exp in intent.expectations:
+        try:
+            out.append(space(exp, intent, kb))
+        except KBError:
+            pass  # reported by semantic_check
+    return out
+
+
+def validate_intents(raw: list[dict[str, Any]], kb: KnowledgeBase, existing: list[IntentRecord],
+                     allow_override: bool = False) -> tuple[list[Intent], ValidationReport]:
     report = ValidationReport(title="Intent validation")
     intents, syntax = parse_intents(raw)
     report.add(syntax)
     if not syntax.passed:
         return intents, report
-    intents, semantic = semantic_check(intents, kb)
-    report.add(semantic)
-    if semantic.passed:
-        report.add(detect_conflicts(intents, existing, kb))
+    report.add(semantic_check(intents, kb))
+    if report.passed:
+        report.add(detect_conflicts(intents, existing, kb, allow_override))
     return intents, report

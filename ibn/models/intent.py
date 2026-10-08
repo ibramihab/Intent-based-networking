@@ -1,116 +1,73 @@
-"""Vendor-neutral, structured intent (output of the Intent Layer)."""
+"""Generic, vendor-neutral intent (output of the Intent Layer's understanding step).
+
+An intent says WHAT the operator wants, never HOW. Its `expectations` are concrete traffic tests
+that the Validation Layer simulates and the Control Layer checks after deployment, whatever
+technique the AI later chooses to implement it.
+"""
 
 from __future__ import annotations
 
 import ipaddress
 from datetime import datetime, timezone
-from enum import Enum
 from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-class Protocol(str, Enum):
-    IP = "ip"  # any IP traffic
-    ICMP = "icmp"
-    TCP = "tcp"
-    UDP = "udp"
+class Expectation(BaseModel):
+    """A traffic test: traffic from src to dst must be allowed or denied."""
 
+    model_config = ConfigDict(extra="ignore")
 
-class Action(str, Enum):
-    PERMIT = "permit"
-    DENY = "deny"
-
-
-class SolutionKind(str, Enum):
-    ACL = "acl"
-    FIREWALL = "firewall"  # Cisco: zone-based policy firewall
-    VLAN = "vlan"
-
-
-class Endpoint(BaseModel):
-    """Exactly one of group (e.g. HR), host (e.g. VPC4) or subnet (CIDR)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    group: str | None = None
-    host: str | None = None
-    subnet: str | None = None
+    src: str = Field(description="host, group, device, IP address or CIDR")
+    dst: str
+    protocol: Literal["any", "icmp", "tcp", "udp"] = "any"
+    port: int | None = Field(None, ge=1, le=65535, description="destination port (tcp/udp only)")
+    expect: Literal["allow", "deny"]
 
     @model_validator(mode="after")
-    def _exactly_one(self) -> "Endpoint":
-        given = [f for f in ("group", "host", "subnet") if getattr(self, f)]
-        if len(given) != 1:
-            raise ValueError("endpoint needs exactly one of: group, host, subnet")
-        if self.subnet:
-            try:
-                ipaddress.IPv4Network(self.subnet, strict=True)
-            except ValueError as exc:
-                raise ValueError(f"invalid subnet {self.subnet!r}: {exc}") from exc
+    def _port_needs_l4(self) -> "Expectation":
+        if self.port is not None and self.protocol not in ("tcp", "udp"):
+            raise ValueError(f"port is only valid for tcp/udp, not {self.protocol}")
         return self
 
     @property
     def label(self) -> str:
-        return self.group or self.host or self.subnet or "?"
+        svc = self.protocol + (f"/{self.port}" if self.port else "")
+        return f"{self.src} -> {self.dst} {svc}: {self.expect}"
 
 
-class Service(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class Scope(BaseModel):
+    model_config = ConfigDict(extra="ignore")
 
-    protocol: Protocol = Protocol.IP
-    ports: list[int] = Field(default_factory=list, description="destination ports (tcp/udp only)")
+    groups: list[str] = Field(default_factory=list)
+    hosts: list[str] = Field(default_factory=list)
+    devices: list[str] = Field(default_factory=list)
+    subnets: list[str] = Field(default_factory=list)
 
-    @field_validator("ports")
+    @field_validator("subnets")
     @classmethod
-    def _port_range(cls, ports: list[int]) -> list[int]:
-        for p in ports:
-            if not 1 <= p <= 65535:
-                raise ValueError(f"port {p} out of range 1-65535")
-        return sorted(set(ports))
-
-    @model_validator(mode="after")
-    def _ports_need_l4(self) -> "Service":
-        if self.ports and self.protocol not in (Protocol.TCP, Protocol.UDP):
-            raise ValueError(f"ports are only valid for tcp/udp, not {self.protocol.value}")
-        return self
-
-    @property
-    def label(self) -> str:
-        if self.ports:
-            return f"{self.protocol.value}/{','.join(map(str, self.ports))}"
-        return self.protocol.value
+    def _cidrs(cls, subnets: list[str]) -> list[str]:
+        for s in subnets:
+            try:
+                ipaddress.IPv4Network(s, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"invalid subnet {s!r}") from exc
+        return subnets
 
 
 class Intent(BaseModel):
-    """A traffic-policy intent. New intent types are added as new models + a `type` literal."""
-
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     id: str = Field(default_factory=lambda: f"int-{uuid4().hex[:8]}")
-    type: Literal["traffic_policy"] = "traffic_policy"
-    description: str
-    action: Action
-    source: Endpoint
-    destination: Endpoint
-    services: list[Service] = Field(default_factory=lambda: [Service()], min_length=1)
-    bidirectional: bool = False
-    priority: int = Field(100, ge=1, le=1000, description="higher wins on overlap")
-    solution: SolutionKind = Field(SolutionKind.ACL, description="enforcement mechanism, chosen by the LLM")
-    solution_reason: str = ""
+    description: str = Field(min_length=3)
+    category: str = "other"
+    requirements: list[str] = Field(default_factory=list)
+    scope: Scope = Field(default_factory=Scope)
+    expectations: list[Expectation] = Field(default_factory=list)
+    priority: int = Field(100, ge=1, le=1000, description="higher wins when intents overlap")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    @model_validator(mode="before")
-    @classmethod
-    def _legacy_fields(cls, data):
-        if isinstance(data, dict) and "preferred_solution" in data:  # intents saved before the LLM chose
-            data = dict(data)
-            legacy = data.pop("preferred_solution")
-            data.setdefault("solution", legacy or SolutionKind.ACL.value)
-        return data
-
     def summary(self) -> str:
-        arrow = "<->" if self.bidirectional else "->"
-        svcs = " ".join(s.label for s in self.services)
-        return (f"{self.action.value.upper()} {self.source.label} {arrow} {self.destination.label} [{svcs}] "
-                f"via {self.solution.value} (prio {self.priority})")
+        return f"[{self.category}] {self.description} (prio {self.priority})"
