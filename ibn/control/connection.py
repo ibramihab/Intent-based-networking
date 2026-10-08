@@ -54,8 +54,12 @@ class NetmikoConnection:
             if params["secret"]:
                 self._conn.enable()
         except Exception as exc:
+            hint = ""
+            if "kex" in str(exc) or "Incompatible ssh peer" in str(exc):
+                hint = (" | Hint: the device only offers old SSH algorithms; reinstall IBN so paramiko 3.x is used "
+                        "(pip install -e \".[dev]\")")
             raise ConnectionError_(f"{self.name}: cannot connect to {params['host']}:{params['port']} "
-                                   f"via {self.device.mgmt.transport}: {exc}") from exc
+                                   f"via {self.device.mgmt.transport}: {exc}{hint}") from exc
 
     def close(self) -> None:
         if self._conn:

@@ -14,6 +14,8 @@ dependencies = [
   "uvicorn>=0.29",
   "requests>=2.31",
   "netmiko>=4.3",
+  # paramiko 4+/5 dropped the SHA-1 key exchanges that IOS 15 / IOL routers still require
+  "paramiko>=3.4,<4",
 ]
 
 [project.optional-dependencies]
