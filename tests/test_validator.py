@@ -96,9 +96,9 @@ def test_zone_based_firewall_design_is_simulated(check):
             "policy-map type inspect IBN_PM_RET", " class type inspect IBN_CM_ALL", "  pass", " class class-default", "  drop",
             "zone-pair security IBN_ZP_IN source IBN_CORE destination IBN_HR", " service-policy type inspect IBN_PM_RET",
             "interface Ethernet0/2", " zone-member security IBN_HR", "interface Ethernet0/0", " zone-member security IBN_CORE",
-            "interface Tunnel0", " zone-member security IBN_CORE"]
+            "interface Tunnel1", " zone-member security IBN_CORE"]
     rollback = ["interface Ethernet0/2", " no zone-member security IBN_HR", "interface Ethernet0/0",
-                " no zone-member security IBN_CORE", "interface Tunnel0", " no zone-member security IBN_CORE",
+                " no zone-member security IBN_CORE", "interface Tunnel1", " no zone-member security IBN_CORE",
                 "no zone-pair security IBN_ZP_OUT", "no zone-pair security IBN_ZP_IN", "no policy-map type inspect IBN_PM",
                 "no policy-map type inspect IBN_PM_RET", "no class-map type inspect match-any IBN_CM_SSH",
                 "no class-map type inspect match-any IBN_CM_ALL", "no ip access-list extended IBN_SSH",
@@ -144,7 +144,7 @@ def test_management_interface_is_protected_and_not_simulated(kb, root):
         synced[dev] += f"interface Ethernet0/3\n ip address 192.168.100.{10 + i} 255.255.255.0\n"
     sim = Simulator(kb, build_models(kb, synced))
     assert "Ethernet0/3" not in sim.models["R1"].interfaces
-    assert sim.evaluate(Flow("10.0.1.10", "10.0.3.10", "icmp")).trace[0].endswith("out=Tunnel0")
+    assert sim.evaluate(Flow("10.0.1.10", "10.0.3.10", "icmp")).trace[0].endswith("out=Tunnel1")
     intents = [Intent.model_validate(intent(expectations=[]))]
     res = Validator(kb).validate(ConfigDesign.model_validate(design(
         commands=["interface Ethernet0/3", " shutdown"], rollback=["interface Ethernet0/3", " no shutdown"])),
