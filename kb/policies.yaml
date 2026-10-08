@@ -1,0 +1,33 @@
+# Organisation-wide policies and guardrails, read by every layer.
+
+# Posture of IBN-managed ACLs once all intent rules are evaluated.
+# "permit" keeps today's open network and only adds the restrictions intents ask for.
+default_acl_action: permit
+
+# Infrastructure subnets. A change that alters traffic where BOTH ends are inside these
+# (routing adjacencies, GRE tunnel, router-to-router management) is rejected.
+protected_subnets:
+  - 10.1.2.0/24   # R1-R2
+  - 10.2.3.0/24   # R2-R3
+  - 10.1.3.0/24   # R1-R3 tunnel
+
+# VLANs the generator may allocate, and VLANs that must never be used.
+vlan_range: [100, 999]
+reserved_vlans: [1, 1002, 1003, 1004, 1005]
+
+# Enforce the 10.x.y.0/24 (x<y) point-to-point addressing convention in `ibn kb check`.
+p2p_convention: true
+
+# Solution Selector: base scores per solution (tune to your organisation's preference).
+solution_weights:
+  acl: 70
+  firewall: 55
+  vlan: 60
+
+deployment:
+  # Staged rollout: devices are configured one at a time in this role order.
+  stage_order: [switch, router]
+  auto_rollback: true
+  save_config: false
+  # Extra traffic probes run (from routers) after every deployment.
+  probe_services: ["icmp", "tcp/22", "tcp/80", "tcp/443", "udp/53"]

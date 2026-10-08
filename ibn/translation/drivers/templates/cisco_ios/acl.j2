@@ -1,0 +1,4 @@
+ip access-list extended {{ name }}
+{% for line in aces %}
+ {{ line }}
+{% endfor %}

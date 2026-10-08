@@ -1,0 +1,46 @@
+# Device inventory (Infrastructure Layer contract).
+#
+# platform selects the vendor driver (ibn/translation/drivers). Only cisco_ios exists today;
+# adding e.g. juniper_junos or arista_eos means registering a new driver - nothing else changes.
+#
+# mgmt: how the Control Layer reaches the device.
+#   - Recommended: connect a management cloud (pnet0) in EVE-NG and enable SSH:
+#       transport: ssh, host: <device mgmt IP>, port: 22
+#   - Console only: use the EVE-NG telnet console port of the node:
+#       transport: telnet, host: <EVE-NG IP>, port: <console port, e.g. 32769>
+# Credentials are NEVER stored here - only the names of environment variables holding them.
+
+defaults:
+  vendor: cisco
+  platform: cisco_ios
+  credentials:
+    username_env: IBN_USERNAME
+    password_env: IBN_PASSWORD
+    secret_env: IBN_ENABLE_SECRET
+
+devices:
+  R1:
+    role: router
+    os_version: "IOL 15.x"
+    capabilities: [acl, zbf]
+    mgmt: {host: 192.168.100.11, port: 22, transport: ssh}
+  R2:
+    role: router
+    os_version: "IOL 15.x"
+    capabilities: [acl, zbf]
+    mgmt: {host: 192.168.100.12, port: 22, transport: ssh}
+  R3:
+    role: router
+    os_version: "IOL 15.x"
+    capabilities: [acl, zbf]
+    mgmt: {host: 192.168.100.13, port: 22, transport: ssh}
+  SW1:
+    role: switch
+    os_version: "IOL-L2 15.x"
+    capabilities: [vlan]
+    mgmt: {host: 192.168.100.21, port: 22, transport: ssh}
+  SW3:
+    role: switch
+    os_version: "IOL-L2 15.x"
+    capabilities: [vlan]
+    mgmt: {host: 192.168.100.23, port: 22, transport: ssh}

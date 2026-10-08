@@ -1,0 +1,56 @@
+# Lab topology (EVE-NG, Cisco IOL).
+# Router-to-router links follow 10.x.y.0/24 with x < y, and router N uses host address .N.
+
+devices:
+  R1:
+    interfaces:
+      Ethernet0/0: {ip: 10.1.2.1/24, description: "to R2 e0/0"}
+      Ethernet0/2: {ip: 10.0.1.1/24, description: "HR LAN (SW1 e0/2)"}
+      Tunnel0:
+        ip: 10.1.3.1/24
+        description: "GRE tunnel to R3"
+        tunnel: {source: Ethernet0/0, destination: 10.2.3.3}
+  R2:
+    interfaces:
+      Ethernet0/0: {ip: 10.1.2.2/24, description: "to R1 e0/0"}
+      Ethernet0/1: {ip: 10.2.3.2/24, description: "to R3 e0/1"}
+  R3:
+    interfaces:
+      Ethernet0/1: {ip: 10.2.3.3/24, description: "to R2 e0/1"}
+      Ethernet0/2: {ip: 10.0.3.3/24, description: "Finance LAN (SW3 e0/2)"}
+      Tunnel0:
+        ip: 10.1.3.3/24
+        description: "GRE tunnel to R1"
+        tunnel: {source: Ethernet0/1, destination: 10.1.2.1}
+  SW1:
+    interfaces:
+      Ethernet0/0: {mode: access, vlan: 1, description: "VPC4"}
+      Ethernet0/2: {mode: access, vlan: 1, description: "uplink to R1 e0/2"}
+  SW3:
+    interfaces:
+      Ethernet0/0: {mode: access, vlan: 1, description: "VPC5"}
+      Ethernet0/2: {mode: access, vlan: 1, description: "uplink to R3 e0/2"}
+
+links:
+  - [R1:Ethernet0/0, R2:Ethernet0/0]
+  - [R2:Ethernet0/1, R3:Ethernet0/1]
+  - [R1:Tunnel0, R3:Tunnel0]
+  - [R1:Ethernet0/2, SW1:Ethernet0/2]
+  - [R3:Ethernet0/2, SW3:Ethernet0/2]
+
+# Business groups the intent layer can refer to by name.
+groups:
+  HR:
+    subnet: 10.0.1.0/24
+    gateway: R1:Ethernet0/2
+    switch: SW1
+    vlan: 1
+  Finance:
+    subnet: 10.0.3.0/24
+    gateway: R3:Ethernet0/2
+    switch: SW3
+    vlan: 1
+
+hosts:
+  VPC4: {ip: 10.0.1.10, group: HR, attach: SW1:Ethernet0/0}
+  VPC5: {ip: 10.0.3.10, group: Finance, attach: SW3:Ethernet0/0}
